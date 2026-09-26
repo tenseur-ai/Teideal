@@ -4,7 +4,7 @@ A local, Jira-style board for the Teideal backlog: 19 epics, 108 user stories an
 
 ## Run it
 
-Double-click `index.html` to open it in Chrome, Edge, Firefox or Safari. It needs no server, no install and no internet connection.
+Double-click `index.html` to open it in Chrome, Edge, Firefox or Safari. It needs no server, no install and no internet connection. Keep `app.js` in the same folder as `index.html` — the board loads it as a companion script.
 
 If your browser restricts local files, serve the folder instead:
 
@@ -24,6 +24,8 @@ Then open http://localhost:8000.
 ## Your progress
 
 Progress is saved in your browser's local storage for this file. To share progress or move it to another machine, use **Export progress** and **Import progress**. **Reset** returns every story to To Do.
+
+When this page is opened as a published Claude Artifact (rather than a local file), progress instead lives on the artifact itself: ticking a criterion or recording a test result republishes the board so every open tab — yours or a teammate's — updates live, with no download or import needed. A viewer without edit access sees a one-time notice and keeps working locally only.
 
 ## Notes
 
