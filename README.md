@@ -1,6 +1,6 @@
 # Teideal delivery board
 
-A local, Jira-style board for the Teideal backlog: 19 epics, 108 user stories and 423 tests.
+A local, Jira-style board for the Teideal backlog: 19 epics, 108 user stories and 793 tests.
 
 ## Run it
 
@@ -29,4 +29,4 @@ Progress is saved in your browser's local storage for this file. To share progre
 
 - Stories are numbered in implementation order (#1 to #108), and every column is sorted by that number.
 - Stories TEID-87 to TEID-127 come from the missing-stories import file. Their keys assume that file is imported next into the TEID project.
-- Tests are generated one per acceptance criterion. Replace them with your real test cases as you write them.
+- Tests combine one functional test per acceptance criterion with targeted non-functional and adversarial test cases per story, based on that story's risk area (security, performance, data integrity, etc).
