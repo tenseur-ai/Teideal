@@ -1,0 +1,22 @@
+import type { FastifyInstance } from "fastify";
+import type { Pool } from "pg";
+
+// The security monitoring dashboard (TEID-41-T6/AC2). security_events spans
+// tenants by nature (an attempt made *by* one tenant *against* another), so
+// it is deliberately not gated by tenant API key -- it is gated by a
+// separate internal-admin secret. This is a placeholder for the role check
+// TEID-43 (RBAC) will add; see docs/isolation-design.md.
+export function registerSecurityRoutes(app: FastifyInstance, pool: Pool, adminSecret: string) {
+  app.get("/admin/security-events", async (req, reply) => {
+    if (req.headers["x-internal-admin-key"] !== adminSecret) {
+      return reply.code(401).send({ error: "missing or invalid admin key" });
+    }
+    const { rows } = await pool.query(
+      `SELECT id, occurred_at, acting_tenant_id, target_tenant_id, endpoint, http_method, detail, resolved_action
+       FROM security_events
+       ORDER BY occurred_at DESC
+       LIMIT 500`,
+    );
+    return reply.send({ data: rows });
+  });
+}

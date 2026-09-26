@@ -1,0 +1,10 @@
+# Node
+node_modules/
+dist/
+*.log
+
+# Go
+/services/go-usage/go-usage
+
+# Generated, dev-only test fixtures (contains only fixed dev API keys, never real credentials)
+tests/cross-tenant/.fixtures.json

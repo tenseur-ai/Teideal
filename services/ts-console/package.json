@@ -1,0 +1,22 @@
+{
+  "name": "@teideal/ts-console",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Console/admin/customer-facing API surface for Teideal (customers CRUD, security dashboard, support portal). Owns customers and security_events reads.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "fastify": "^5.1.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

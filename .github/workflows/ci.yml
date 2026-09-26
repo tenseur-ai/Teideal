@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  DATABASE_URL: postgres://teideal_app:teideal_app_dev_password@127.0.0.1:5432/teideal
+  ADMIN_SECRET: ci_admin_secret
+  TS_CONSOLE_URL: http://127.0.0.1:8081
+  GO_USAGE_URL: http://127.0.0.1:8082
+  CI: "true"
+  PGPASSWORD: postgres
+
+jobs:
+  # TEID-41-AC2/T2/T5/T7/T8: the cross-tenant isolation regression suite,
+  # run against real running services and a real Postgres on every push.
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: teideal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Apply database migrations
+        run: PSQL_SUPERUSER=postgres bash db/setup-local.sh
+
+      - name: Seed test fixtures (dev tenants, API keys, one customer each)
+        run: PSQL_SUPERUSER=postgres bash db/seed-test-fixtures.sh
+
+      - name: Build and start go-usage
+        working-directory: services/go-usage
+        run: |
+          go build -o /tmp/go-usage ./cmd/server
+          PORT=8082 DATABASE_URL="$DATABASE_URL" /tmp/go-usage &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8082/healthz && break; sleep 1; done
+
+      - name: Install and start ts-console
+        working-directory: services/ts-console
+        run: |
+          npm ci
+          npm run build
+          PORT=8081 DATABASE_URL="$DATABASE_URL" ADMIN_SECRET="$ADMIN_SECRET" node dist/server.js &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8081/healthz && break; sleep 1; done
+
+      - name: Install cross-tenant suite dependencies
+        working-directory: tests/cross-tenant
+        run: npm ci
+
+      # TEID-41-T1/T2/T3/T4/T6/T7/T8 run here; T5 (the <15 min budget) is
+      # enforced by measure-duration.mjs wrapping this same run.
+      - name: Run TEID-41 acceptance suite (RLS audit, cross-tenant regression, adversarial, CI-gate structure, support SLA, dashboard latency)
+        working-directory: tests/cross-tenant
+        run: node measure-duration.mjs
+
+  # TEID-41-AC3: a release that fails the suite above must not deploy.
+  # `needs: test` makes that structural -- this job is skipped outright if
+  # the test job fails, not merely warned about. There is no real
+  # deployment target configured yet (that is a separate infra decision);
+  # this stage exists to prove and hold the gate itself.
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "TEID-41-AC3: cross-tenant suite passed -- deploy stage would run here."'
