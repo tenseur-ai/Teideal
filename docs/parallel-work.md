@@ -132,13 +132,35 @@ flag** in its `--help` output. All three just run as an agent with
 shell access inside the given working directory/sandbox; if a PR gets
 opened, it's because the agent itself chose to invoke `git`/`gh` as a
 tool call, which needs `gh` authenticated in that environment and a
-sandbox/permission mode permissive enough to let it run. **Not yet
-confirmed end-to-end** -- the first time one of these is actually driven
-through a full story, confirm whether it reliably runs `git
-commit`/`gh pr create` unprompted, or whether Claude needs to do the
-commit/push/PR step itself after the CLI finishes editing the working
-tree. Until confirmed, assume the latter and verify PR creation
-manually.
+sandbox/permission mode permissive enough to let it run.
+
+**Confirmed end-to-end, three real stories in (TEID-44 and TEID-94 via
+Codex, TEID-16 via Grok):**
+- **Codex, run with `--sandbox workspace-write` against a `git worktree`
+  checkout, cannot commit at all.** The worktree's real Git metadata
+  lives at `<main-repo>/.git/worktrees/<name>/`, outside the sandboxed
+  workdir, so `git commit` fails creating `index.lock` there --
+  confirmed twice, independently, on two different stories. **Passing
+  `--add-dir "<main-repo>/.git"` does not fix this**, despite the flag's
+  own description ("additional directories that should be writable") --
+  the startup banner confirms the sandbox accepted the path as writable,
+  but the actual commit still fails with the same permission error. This
+  looks like a real gap in how that sandbox mode is implemented on native
+  Windows specifically, not a one-off misconfiguration -- don't spend
+  time retrying it; budget for Claude to commit Codex's work from outside
+  the sandbox every time, on this platform, until Codex ships a fix or a
+  different flag actually works.
+- **Grok, run with no `--sandbox` flag (so no sandboxing at all) and
+  `--permission-mode bypassPermissions`, commits, pushes, and opens its
+  own PR successfully**, unassisted, referencing the handoff issue number
+  as instructed. No git-access workaround needed -- the absence of a
+  sandbox is exactly why.
+- **Gemini was never actually tested end-to-end this round** -- its
+  personal/free Google OAuth login is deprecated for this CLI version
+  (`IneligibleTierError`, redirects to a separate "Antigravity" product)
+  and it has no working headless auth without a `GEMINI_API_KEY`, which
+  wasn't available. TEID-94 was reassigned to Codex instead once Codex's
+  usage quota reset. Revisit Gemini once an API key is available.
 
 Given none of the three self-manages branches, the practical pattern for
 a local-CLI-driven story: Claude creates the agent's branch first
@@ -261,5 +283,7 @@ so far and `main` has never diverged).
 | Phase (epic) | Spec author | Developer agent | Status |
 |---|---|---|---|
 | E05 -- tenant isolation, access control, data ownership | Claude | Codex | TEID-41, TEID-91 done (built directly by Claude before this process existed); TEID-42 done (PR #1 merged); TEID-92 done (PR #2 merged, independently verified); TEID-43 done (PR #3 merged, independently verified against a from-scratch DB rebuild -- rbac 8/8, cross-tenant 23/23, console-auth 13/13, audit-log 7/7, api-keys 9/9); TEID-44 done (PR #5 merged -- first story driven via the local-CLI path; Codex got 6/8 tests green before exhausting its usage quota, Claude finished it (re-pinned a broken `@dsnp/parquetjs` release, fixed a Windows-checkout CRLF bug caught during verification), independently verified against a from-scratch DB rebuild and again on GitHub Actions -- data-export 8/8, cross-tenant 27/27, console-auth 13/13, audit-log 7/7, api-keys 9/9, rbac 8/8); no further E05 stories currently cataloged beyond this -- check the live board for anything added since |
-| E03 -- usage ingestion and exactly-once ledger | Claude | Gemini | TEID-30 done (merged into Claude's branch, independently verified twice -- once per-branch, again post-merge alongside TEID-43 against a from-scratch DB rebuild); TEID-94 spec next, then TEID-95/96/31/32/33/35/34/97/36 |
-| E01 -- entitlement model and pricing configuration | Claude | Cursor/Grok | Newly assigned 2026-09-27. Lives in `services/ts-console` like E05, but a structurally separate file set (new `plans`/`grants`/`commits`/`overrides` tables and routes -- nothing E05 owns). MVP order is TEID-16, 17, 18, 19, 20, 22, 23 (TEID-21 is phase-2, out of order for now). TEID-16 spec next. |
+| E03 -- usage ingestion and exactly-once ledger | Claude | Gemini (TEID-30), Codex (TEID-94, reassigned -- see below) | TEID-30 done (merged into Claude's branch, independently verified twice -- once per-branch, again post-merge alongside TEID-43 against a from-scratch DB rebuild); TEID-94 done (PR #9, merged as `946d3b3` -- Codex implemented after Gemini's auth turned out to be broken, see "Gemini auth" note below; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- currency-rounding 9/9, usage-ingestion 7/7 in isolation); next: TEID-95/96/31/32/33/35/34/97/36, none specced yet |
+| E01 -- entitlement model and pricing configuration | Claude | Cursor/Grok | TEID-16 done (PR #8, merged as `ffea8df` -- Grok implemented, committed, pushed, and opened its own PR fully unassisted, unsandboxed; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- plans 9/9, cross-tenant 32/32, console-auth 13/13, audit-log 7/7, api-keys 9/9, rbac 8/8, data-export 8/8). Lives in `services/ts-console` like E05, but a structurally separate file set (new `plans`/`plan_rates` tables and routes -- nothing E05 owns). MVP order is TEID-16, 17, 18, 19, 20, 22, 23 (TEID-21 is phase-2, out of order for now); next: TEID-17, not specced yet. |
+
+**Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
