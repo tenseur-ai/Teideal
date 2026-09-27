@@ -129,6 +129,14 @@ jobs:
         working-directory: tests/rbac
         run: npx vitest run
 
+      - name: Install plans suite dependencies
+        working-directory: tests/plans
+        run: npm ci
+
+      - name: Run TEID-16 acceptance suite (draft plans, metric rates, validation, publish, concurrency)
+        working-directory: tests/plans
+        run: npx vitest run
+
       - name: Run TEID-44 acceptance suite (formats, SLAs, schedules, docs, retries, concurrency, ownership)
         working-directory: tests/data-export
         run: npx vitest run
