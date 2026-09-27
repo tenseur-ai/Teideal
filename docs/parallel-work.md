@@ -124,5 +124,5 @@ whatever order they finish.
 
 | Phase (epic) | Spec author | Developer agent | Status |
 |---|---|---|---|
-| E05 -- tenant isolation, access control, data ownership | Claude | Codex | TEID-41, TEID-91 done (built directly by Claude before this process existed); TEID-42 done (PR #1 merged); TEID-92 done (PR #2 merged, independently verified against a from-scratch DB rebuild); TEID-43 spec next, then TEID-44 |
+| E05 -- tenant isolation, access control, data ownership | Claude | Codex | TEID-41, TEID-91 done (built directly by Claude before this process existed); TEID-42 done (PR #1 merged); TEID-92 done (PR #2 merged, independently verified against a from-scratch DB rebuild); TEID-43 spec ready (`specs/TEID-43.md`), not yet claimed/started; TEID-44 spec next |
 | E03 -- usage ingestion and exactly-once ledger | Claude | Gemini | TEID-30 spec ready; not yet claimed/started; TEID-94/95/96/31/32/33/35/34/97/36 to follow |
