@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"regexp"
 	"time"
@@ -15,9 +14,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
 
 	"teideal/go-usage/internal/auth"
 	"teideal/go-usage/internal/db"
+	"teideal/go-usage/internal/money"
 	"teideal/go-usage/internal/security"
 )
 
@@ -26,15 +28,22 @@ type Handlers struct {
 }
 
 type usageEvent struct {
-	ID             string    `json:"id"`
-	CustomerID     string    `json:"customer_id"`
-	EventType      string    `json:"event_type"`
-	Quantity       float64   `json:"quantity"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	OccurredAt     time.Time `json:"occurred_at"`
+	ID             string          `json:"id"`
+	CustomerID     string          `json:"customer_id"`
+	EventType      string          `json:"event_type"`
+	Quantity       decimal.Decimal `json:"quantity"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	OccurredAt     time.Time       `json:"occurred_at"`
 }
 
 var eventTypeRegex = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+var oneTrillion = decimal.New(1, 12)
+
+func init() {
+	// decimal defaults to quoted JSON strings. Usage quantities have always
+	// been JSON number tokens, so opt into the library's exact raw-token mode.
+	decimal.MarshalJSONWithoutQuotes = true
+}
 
 func validateEventType(et string) error {
 	if !eventTypeRegex.MatchString(et) {
@@ -43,9 +52,12 @@ func validateEventType(et string) error {
 	return nil
 }
 
-func validateQuantity(q float64) error {
-	if q < 0 || math.IsNaN(q) || math.IsInf(q, 0) {
+func validateQuantity(q decimal.Decimal) error {
+	if q.IsNegative() {
 		return errors.New("quantity must be a non-negative number")
+	}
+	if q.GreaterThan(oneTrillion) {
+		return errors.New("quantity must not exceed 1000000000000 (one trillion)")
 	}
 	return nil
 }
@@ -96,7 +108,12 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		for rows.Next() {
 			var e usageEvent
-			if err := rows.Scan(&e.ID, &e.CustomerID, &e.EventType, &e.Quantity, &e.IdempotencyKey, &e.OccurredAt); err != nil {
+			var quantity pgtype.Numeric
+			if err := rows.Scan(&e.ID, &e.CustomerID, &e.EventType, &quantity, &e.IdempotencyKey, &e.OccurredAt); err != nil {
+				return err
+			}
+			e.Quantity, err = money.FromPGNumeric(quantity)
+			if err != nil {
 				return err
 			}
 			events = append(events, e)
@@ -113,10 +130,10 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 type postUsageRequest struct {
-	CustomerID     string  `json:"customer_id"`
-	EventType      string  `json:"event_type"`
-	Quantity       float64 `json:"quantity"`
-	IdempotencyKey string  `json:"idempotency_key"`
+	CustomerID     string          `json:"customer_id"`
+	EventType      string          `json:"event_type"`
+	Quantity       decimal.Decimal `json:"quantity"`
+	IdempotencyKey string          `json:"idempotency_key"`
 }
 
 type rawBatchItem struct {
@@ -127,14 +144,14 @@ type rawBatchItem struct {
 }
 
 type batchResultItem struct {
-	Status         string     `json:"status"`
-	ID             string     `json:"id,omitempty"`
-	CustomerID     string     `json:"customer_id,omitempty"`
-	EventType      string     `json:"event_type,omitempty"`
-	Quantity       *float64   `json:"quantity,omitempty"`
-	IdempotencyKey string     `json:"idempotency_key,omitempty"`
-	OccurredAt     *time.Time `json:"occurred_at,omitempty"`
-	Reason         string     `json:"reason,omitempty"`
+	Status         string           `json:"status"`
+	ID             string           `json:"id,omitempty"`
+	CustomerID     string           `json:"customer_id,omitempty"`
+	EventType      string           `json:"event_type,omitempty"`
+	Quantity       *decimal.Decimal `json:"quantity,omitempty"`
+	IdempotencyKey string           `json:"idempotency_key,omitempty"`
+	OccurredAt     *time.Time       `json:"occurred_at,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
 }
 
 // PostUsage handles POST /usage. tenant_id is always taken from the
@@ -195,10 +212,16 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	quantity, err := money.ToPGNumeric(req.Quantity)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "quantity must be a non-negative number")
+		return
+	}
 
 	var created usageEvent
+	var createdQuantity pgtype.Numeric
 	var customerNotVisible bool
-	err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1)`, req.CustomerID).Scan(&exists); err != nil {
 			return err
@@ -211,8 +234,8 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
 			VALUES ($1, $2, $3, $4, $5)
 			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-		`, principal.TenantID, req.CustomerID, req.EventType, req.Quantity, req.IdempotencyKey).
-			Scan(&created.ID, &created.CustomerID, &created.EventType, &created.Quantity, &created.IdempotencyKey, &created.OccurredAt)
+		`, principal.TenantID, req.CustomerID, req.EventType, quantity, req.IdempotencyKey).
+			Scan(&created.ID, &created.CustomerID, &created.EventType, &createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
 	})
 
 	if customerNotVisible {
@@ -233,6 +256,12 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 			return
 		}
 		log.Printf("PostUsage: %v", err)
+		writeErr(w, http.StatusInternalServerError, "failed to record usage event")
+		return
+	}
+	created.Quantity, err = money.FromPGNumeric(createdQuantity)
+	if err != nil {
+		log.Printf("PostUsage quantity conversion: %v", err)
 		writeErr(w, http.StatusInternalServerError, "failed to record usage event")
 		return
 	}
@@ -289,13 +318,18 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			results[i] = batchResultItem{Status: "error", Reason: "quantity must be a non-negative number"}
 			continue
 		}
-		var qty float64
+		var qty decimal.Decimal
 		if err := json.Unmarshal(item.Quantity, &qty); err != nil {
 			results[i] = batchResultItem{Status: "error", Reason: "quantity must be a non-negative number"}
 			continue
 		}
 		if err := validateQuantity(qty); err != nil {
 			results[i] = batchResultItem{Status: "error", Reason: err.Error()}
+			continue
+		}
+		quantity, err := money.ToPGNumeric(qty)
+		if err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: "quantity must be a non-negative number"}
 			continue
 		}
 
@@ -305,8 +339,9 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 		}
 
 		var created usageEvent
+		var createdQuantity pgtype.Numeric
 		var customerNotVisible bool
-		err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var exists bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1)`, *item.CustomerID).Scan(&exists); err != nil {
 				return err
@@ -319,8 +354,8 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 				INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
 				VALUES ($1, $2, $3, $4, $5)
 				RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-			`, principal.TenantID, *item.CustomerID, *item.EventType, qty, *item.IdempotencyKey).
-				Scan(&created.ID, &created.CustomerID, &created.EventType, &created.Quantity, &created.IdempotencyKey, &created.OccurredAt)
+			`, principal.TenantID, *item.CustomerID, *item.EventType, quantity, *item.IdempotencyKey).
+				Scan(&created.ID, &created.CustomerID, &created.EventType, &createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
 		})
 
 		if customerNotVisible {
@@ -354,6 +389,12 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			results[i] = batchResultItem{Status: "error", Reason: "failed to record usage event"}
 			continue
 		}
+		created.Quantity, err = money.FromPGNumeric(createdQuantity)
+		if err != nil {
+			log.Printf("PostUsage batch item %d quantity conversion: %v", i, err)
+			results[i] = batchResultItem{Status: "error", Reason: "failed to record usage event"}
+			continue
+		}
 
 		results[i] = batchResultItem{
 			Status:         "created",
@@ -369,3 +410,51 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 	writeJSON(w, http.StatusMultiStatus, map[string]any{"results": results})
 }
 
+type usageSummaryResponse struct {
+	EventCount    int64  `json:"event_count"`
+	TotalQuantity string `json:"total_quantity"`
+}
+
+// GetUsageSummary handles GET /usage/summary?customer_id=<uuid>. PostgreSQL
+// performs the NUMERIC aggregation exactly and RLS confines it to the caller's
+// tenant.
+func (h *Handlers) GetUsageSummary(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+
+	var customerFilter *string
+	if raw := r.URL.Query().Get("customer_id"); raw != "" {
+		if _, err := uuid.Parse(raw); err != nil {
+			writeErr(w, http.StatusBadRequest, "customer_id must be a UUID")
+			return
+		}
+		customerFilter = &raw
+	}
+
+	var response usageSummaryResponse
+	var total pgtype.Numeric
+	err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT COUNT(*), COALESCE(SUM(quantity), 0)
+			FROM usage_events
+			WHERE ($1::uuid IS NULL OR customer_id = $1)
+		`, customerFilter).Scan(&response.EventCount, &total)
+	})
+	if err != nil {
+		log.Printf("GetUsageSummary: %v", err)
+		writeErr(w, http.StatusInternalServerError, "failed to summarize usage events")
+		return
+	}
+	totalQuantity, err := money.FromPGNumeric(total)
+	if err != nil {
+		log.Printf("GetUsageSummary quantity conversion: %v", err)
+		writeErr(w, http.StatusInternalServerError, "failed to summarize usage events")
+		return
+	}
+	response.TotalQuantity = totalQuantity.String()
+
+	writeJSON(w, http.StatusOK, response)
+}
