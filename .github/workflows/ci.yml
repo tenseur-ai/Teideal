@@ -119,6 +119,14 @@ jobs:
         working-directory: tests/rbac
         run: npx vitest run
 
+      - name: Install usage ingestion suite dependencies
+        working-directory: tests/usage-ingestion
+        run: npm ci
+
+      - name: Run TEID-30 acceptance suite (single & batch ingestion, durability, load, partial batch rejections, read-after-write lag, batch size enforcement, adversarial)
+        working-directory: tests/usage-ingestion
+        run: npx vitest run
+
   # TEID-41-AC3: a release that fails the suite above must not deploy.
   # `needs: test` makes that structural -- this job is skipped outright if
   # the test job fails, not merely warned about. There is no real
