@@ -1,0 +1,24 @@
+{
+  "name": "@teideal/console-auth-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-91 acceptance suite: password + Google sign-in, mandatory-MFA enrollment, idle session expiry, lockout, audit logging, and adversarial (IP-rotation lockout bypass, MFA-disable step-up) cases.",
+  "scripts": {
+    "test": "vitest run",
+    "fake-google": "tsx fake-google.ts"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "jose": "^6.2.12",
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

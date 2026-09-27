@@ -10,7 +10,10 @@
     "dev": "tsx src/server.ts"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "fastify": "^5.1.0",
+    "jose": "^6.2.12",
+    "otpauth": "^9.5.2",
     "pg": "^8.13.1"
   },
   "devDependencies": {
