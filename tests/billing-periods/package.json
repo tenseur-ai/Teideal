@@ -1,0 +1,16 @@
+{
+  "name": "@teideal/billing-periods-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-96 acceptance suite: billing periods, time zones, DST boundaries, month-end clamping, and explicit event timestamps.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
+
