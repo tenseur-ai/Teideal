@@ -8,6 +8,11 @@ dist/
 
 # Go
 /services/go-usage/go-usage
+/services/go-usage/go-usage.exe
 
 # Generated, dev-only test fixtures (contains only fixed dev API keys, never real credentials)
 tests/cross-tenant/.fixtures.json
+
+# Scratch output from ad-hoc local type-checks/test runs
+.tmp-run/
+.tmp-*

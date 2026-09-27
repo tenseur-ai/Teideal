@@ -6,10 +6,14 @@
   "description": "Console/admin/customer-facing API surface for Teideal (customers CRUD, security dashboard, support portal). Owns customers and security_events reads.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "generate:export-doc": "tsx src/scripts/generateExportFormatDoc.ts",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1141.0",
+    "@aws-sdk/client-sts": "3.1141.0",
+    "@dsnp/parquetjs": "1.8.8",
     "bcryptjs": "^3.0.3",
     "fastify": "^5.1.0",
     "jose": "^6.2.12",
