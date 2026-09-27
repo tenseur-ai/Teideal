@@ -2,6 +2,8 @@
 
 Story implemented on branch `grok/teid-17-grants` against `specs/TEID-17.md`. Concerns and judgment calls are in `NOTES-TEID-17.md`.
 
+Pull request: https://github.com/Sathyanarayan-Kiran/Teideal/pull/13 (base `claude/eager-brown-dlqfl4`, references issue #10).
+
 ## What landed
 
 - `db/migrations/20260927143258_grants.sql` — `recurring_grant_templates`, `grants` (partial unique index `grants_recurring_period_unique`), `grant_ledger_entries`, with the same RLS/GRANT shape as the other migrations.
