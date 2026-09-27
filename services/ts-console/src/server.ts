@@ -10,13 +10,16 @@ import { registerTenantSettingsRoutes } from "./routes/tenantSettings.js";
 import { registerAuditLogRoutes } from "./routes/auditLog.js";
 import { registerApiKeyRoutes } from "./routes/apiKeys.js";
 import { registerPlanRoutes } from "./routes/plans.js";
+import { registerGrantRoutes } from "./routes/grants.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
+import { processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
+const GRANT_WORKER_INTERVAL_MS = 60 * 1000;
 
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -33,6 +36,7 @@ export function buildServer() {
   registerAuditLogRoutes(app, pool);
   registerApiKeyRoutes(app, pool);
   registerPlanRoutes(app, pool);
+  registerGrantRoutes(app, pool);
   registerUserRoutes(app, pool);
   registerExportRoutes(app, pool);
 
@@ -49,6 +53,7 @@ export function buildServer() {
   // can measure it under a controlled load without waiting on this timer.
   let sweepTimer: NodeJS.Timeout | undefined;
   let exportTimer: NodeJS.Timeout | undefined;
+  let grantTimer: NodeJS.Timeout | undefined;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -57,11 +62,19 @@ export function buildServer() {
       Promise.all([processPendingExports(pool), processScheduledExports(pool)])
         .catch((err) => console.error("export worker failed:", err));
     }, EXPORT_WORKER_INTERVAL_MS);
+    // Tests call processRecurringGrants / processExpiredGrants directly so
+    // they can pass a fixed instant. Issuance is idempotent per period, so
+    // this timer cannot double-issue when it overlaps a manual run.
+    grantTimer = setInterval(() => {
+      Promise.all([processRecurringGrants(pool), processExpiredGrants(pool)])
+        .catch((err) => console.error("grant worker failed:", err));
+    }, GRANT_WORKER_INTERVAL_MS);
   }
 
   app.addHook("onClose", async () => {
     if (sweepTimer) clearInterval(sweepTimer);
     if (exportTimer) clearInterval(exportTimer);
+    if (grantTimer) clearInterval(grantTimer);
     await pool.end();
   });
 
