@@ -9,6 +9,35 @@
 | Release | mvp |
 | Order | 4 (within E05) |
 | Depends on | `api_keys` table (TEID-41, `db/migrations/20260926120000_init.sql`), `services/go-usage/internal/auth/auth.go`, `services/ts-console/src/lib/auth.ts`, `recordConfigChange`/`recordConfigChangeWithClient` (TEID-42, `services/ts-console/src/lib/audit.ts`) |
+| Revision | v2 -- see "Revision note" below. Fixes missing grants, undefined tenant isolation on the new endpoints, and a rotation audit-count contradiction, all correctly flagged before any code was written. |
+
+## Revision note
+
+Three real gaps, caught before writing any code -- exactly the right
+call, not something to have guessed around:
+
+1. **Missing grants.** `teideal_app` has only `SELECT` on `api_keys`
+   (TEID-41's migration, line 56) -- every write this story needs
+   (create, rotate, revoke, `last_used_at` updates) would fail with
+   `42501`. Fixed: the new migration adds `INSERT`/`UPDATE` grants.
+2. **Undefined tenant isolation.** `api_keys` deliberately has no RLS
+   (same migration, line 51 -- it's a pre-auth resolution table, same
+   category as `sessions`/`pending_logins`). v1 said the new management
+   endpoints were "tenant-scoped via `withTenant`", which is meaningless
+   for a table RLS doesn't touch -- `withTenant` only sets
+   `app.tenant_id` for policies to read; with no policy, it does
+   nothing. Fixed below: every management query gets an explicit
+   `issued_to_tenant_id = $1` predicate, and cross-tenant access is
+   defined (403, matching `customers.ts`'s existing convention) and
+   tested (added to `tests/cross-tenant`, not left uncovered).
+3. **Rotation audit count.** v1 had rotation write two audit rows (a
+   "create" for the new key via the same path `POST /api-keys` uses,
+   plus a separate "expiring" row for the old key) while T5 expects
+   exactly three rows total across create+rotate+revoke -- one per
+   action. Fixed: rotation writes exactly one audit row (on the old
+   key, describing both the expiry and what it rotated to); the new
+   key's row is inserted directly, not through the create endpoint's
+   audit-writing code path.
 
 ## Story (verbatim from the live board)
 
@@ -85,7 +114,17 @@ ALTER TABLE api_keys
 
 ALTER TABLE api_keys ALTER COLUMN scope DROP DEFAULT;
 ALTER TABLE api_keys ALTER COLUMN environment DROP DEFAULT;
+
+GRANT INSERT, UPDATE ON api_keys TO teideal_app;
 ```
+
+`teideal_app` had only `SELECT` on `api_keys` (TEID-41 -- the app only
+ever needed to look a key up, never to write one). This story is the
+first to create, rotate, or revoke a key through the app itself, so it
+needs `INSERT` (create, and the new row a rotation produces) and
+`UPDATE` (revoke's `revoked_at`, rotation's `expires_at` on the old row,
+and `last_used_at` on every successful resolve) -- without this grant
+every write in this spec fails with Postgres permission error `42501`.
 
 (The `DEFAULT`s exist only so the `ALTER TABLE` succeeds against
 existing rows from TEID-41's dev-fixture seed data; dropped immediately
@@ -165,16 +204,36 @@ a display field, not a security control).
 ### API key management endpoints (new, session-authed, ts-console)
 
 New file `services/ts-console/src/routes/apiKeys.ts`, `requireSession`
--gated (same pattern as `tenantSettings.ts`/`auditLog.ts`), tenant-scoped
-via `withTenant`. No role check yet -- the story's own framing is "as a
-developer", and TEID-43 (the role that will eventually own this,
-per its own AC listing "Developer (API keys and sandbox)") doesn't exist
-yet; any authenticated session for the tenant may manage that tenant's
-keys, matching how every other pre-RBAC endpoint in this codebase is
-scoped.
+-gated (same pattern as `tenantSettings.ts`/`auditLog.ts`). No role
+check yet -- the story's own framing is "as a developer", and TEID-43
+(the role that will eventually own this, per its own AC listing
+"Developer (API keys and sandbox)") doesn't exist yet; any authenticated
+session for the tenant may manage that tenant's keys, matching how every
+other pre-RBAC endpoint in this codebase is scoped.
+
+**Tenant isolation here is manual, not RLS.** `api_keys` has no RLS
+policy (deliberately -- see the migration's own comment), so every
+query below must filter by `issued_to_tenant_id = req.consolePrincipal
+.tenantId` explicitly, in the query itself, not by relying on
+`withTenant`/`SET LOCAL app.tenant_id` to do it invisibly the way it
+does for RLS-protected tables elsewhere in this codebase. A key id that
+exists but belongs to another tenant must be indistinguishable from a
+key id that doesn't exist at all -- **`404`** for `GET`/`GET :id` (there
+is nothing to "forbid", the row is simply not found for this query),
+and **`403`** for `POST :id/rotate` and `POST :id/revoke` (an attempted
+write, matching `customers.ts`'s existing convention for the same
+situation). These four endpoints are new API surface reachable by a
+tenant-authenticated session, so TEID-41-T2's "every documented API
+endpoint" is not a one-time snapshot -- add cross-tenant regression
+cases for all four to `tests/cross-tenant` (acct_1001 attempting to
+list/read/rotate/revoke one of acct_1002's keys), not just to this
+story's own `tests/api-keys` suite. This is the same principle every
+future story that adds an endpoint needs to follow, not something
+special to API keys.
 
 - `POST /api-keys` -- body `{scope, environment, label}`. Generates the
-  key, stores the row (`creator_user_id` from
+  key, stores the row (`issued_to_tenant_id` from
+  `req.consolePrincipal.tenantId`, `creator_user_id` from
   `req.consolePrincipal.userId`), calls `recordConfigChangeWithClient`
   (`objectType: "ApiKey"`, `objectId: <new id>`, `before: null`, `after:
   {scope, environment, label, display_hint}` -- never the plaintext or
@@ -182,29 +241,37 @@ scoped.
   once** (`{id, key: "sk_...", scope, environment, label,
   display_hint}`) -- this is the only response body in the entire API
   that ever contains the plaintext.
-- `GET /api-keys` -- paginated (`?limit=`, default 50, max 200;
-  `?cursor=` an opaque key id for keyset pagination, same reasoning as
-  TEID-42's CSV export but at a much smaller scale -- 1,000 rows doesn't
-  strictly need keyset pagination the way 1.2M did, but reusing the same
-  pattern is simpler than introducing `LIMIT`/`OFFSET` as a second
-  paging style in this codebase). Returns `{data: [...]}`, each entry
-  `{id, display_hint, scope, environment, label, creator_user_id,
-  created_at, last_used_at, status}` -- never `key_hash`.
-- `GET /api-keys/:id` -- same shape as one list entry.
+- `GET /api-keys` -- `WHERE issued_to_tenant_id = $1`, paginated
+  (`?limit=`, default 50, max 200; `?cursor=` an opaque key id for
+  keyset pagination, same reasoning as TEID-42's CSV export but at a
+  much smaller scale -- 1,000 rows doesn't strictly need keyset
+  pagination the way 1.2M did, but reusing the same pattern is simpler
+  than introducing `LIMIT`/`OFFSET` as a second paging style in this
+  codebase). Returns `{data: [...]}`, each entry `{id, display_hint,
+  scope, environment, label, creator_user_id, created_at, last_used_at,
+  status}` -- never `key_hash`.
+- `GET /api-keys/:id` -- `WHERE id = $1 AND issued_to_tenant_id = $2`;
+  no matching row is `404`. Same response shape as one list entry.
 - `POST /api-keys/:id/rotate` -- body `{grace_period_hours?}` (default
-  `24`). Creates a new key row (same `scope`/`environment`/`label` as
-  the old one, new `creator_user_id` = the rotating session's user),
-  sets the **old** row's `expires_at = now() + grace_period_hours
-  hours`, calls `recordConfigChangeWithClient` once (on the old key's
-  row -- the new row's creation already gets its own audit row from the
-  same code path `POST /api-keys` uses), `objectType: "ApiKey"`,
-  `objectId: <old id>`, `before: {status:
-  "active"}`, `after: {status: "expiring", expires_at, rotated_to:
-  <new id>}`. Returns `201` with the new plaintext key once, same shape
-  as create.
-- `POST /api-keys/:id/revoke` -- sets `revoked_at = now()` immediately
-  (no grace period -- AC4 is explicit: "stops working everywhere within
-  60 seconds", not "eventually"), `recordConfigChangeWithClient`
+  `24`). The `UPDATE`/`INSERT` below both carry `issued_to_tenant_id =
+  $tenantId` in their `WHERE`/values; if the old key doesn't match (not
+  found, or belongs to another tenant), `403` before touching anything.
+  Creates a new key row directly (same `scope`/`environment`/`label` as
+  the old one, new `creator_user_id` = the rotating session's user, its
+  own `issued_to_tenant_id`) -- this insert does **not** go through
+  `POST /api-keys`'s handler and does **not** call
+  `recordConfigChangeWithClient` on its own; sets the **old** row's
+  `expires_at = now() + grace_period_hours hours`; then a single
+  `recordConfigChangeWithClient` call (`objectType: "ApiKey"`,
+  `objectId: <old id>`, `before: {status: "active"}`, `after: {status:
+  "expiring", expires_at, rotated_to_id: <new id>}`) is the only audit
+  row this endpoint writes -- one row for the whole rotate action, per
+  T5. Returns `201` with the new plaintext key once, same shape as
+  create.
+- `POST /api-keys/:id/revoke` -- `WHERE id = $1 AND issued_to_tenant_id
+  = $2`; no match is `403`. Sets `revoked_at = now()` immediately (no
+  grace period -- AC4 is explicit: "stops working everywhere within 60
+  seconds", not "eventually"), one `recordConfigChangeWithClient` call
   (`before: {status: "active"}`, `after: {status: "revoked"}`).
 
 ## Implementation guidance per test
@@ -302,8 +369,14 @@ plaintext, not re-deriving cryptographic one-wayness.
   scope enforcement checks against both go-usage and ts-console) --
   point it at both `TS_CONSOLE_URL` and `GO_USAGE_URL` like
   `tests/cross-tenant` already does.
-- CI: add a step to `.github/workflows/ci.yml`'s `test` job running this
-  new suite.
+- `tests/cross-tenant` -- add cross-tenant cases for the four new
+  `/api-keys*` endpoints (acct_1001 against acct_1002's key), per the
+  "Tenant isolation here is manual, not RLS" note above. This lives in
+  the existing suite, not the new `tests/api-keys` one -- it's the same
+  regression suite TEID-41-T2 already runs, just extended.
+- CI: add a step to `.github/workflows/ci.yml`'s `test` job running
+  `tests/api-keys`. `tests/cross-tenant` is already a CI step -- no new
+  step needed for the cases added to it.
 
 ## Definition of done
 
@@ -311,13 +384,18 @@ plaintext, not re-deriving cryptographic one-wayness.
       enforcement genuinely gates both services; AC3/AC4's timing as
       scoped above).
 - [ ] All 9 cataloged tests have real automated tests that pass.
+- [ ] Cross-tenant access to another tenant's key is proven blocked for
+      all four new endpoints (404 on the two reads, 403 on the two
+      writes), in `tests/cross-tenant`.
 - [ ] `go vet ./...` clean in `services/go-usage`; `tsc --noEmit` clean
       in `services/ts-console`.
 - [ ] `tests/cross-tenant`, `tests/console-auth`, `tests/audit-log` all
-      still pass unchanged -- the `Principal`/`Middleware`/`requireAuth`
-      signature changes are additive, and TEID-41's dev-fixture keys
-      (`admin`/`sandbox` via this migration's dropped defaults) keep
-      authenticating exactly as before.
+      still pass (cross-tenant gains new cases per above, everything
+      already there stays passing unchanged) -- the
+      `Principal`/`Middleware`/`requireAuth` signature changes are
+      additive, and TEID-41's dev-fixture keys (`admin`/`sandbox` via
+      this migration's dropped defaults) keep authenticating exactly as
+      before.
 - [ ] Full suite passes against a database rebuilt from scratch via
       `db/setup-local.sh` plus the existing seed scripts.
 - [ ] PR description maps each test ID to its file/line.
