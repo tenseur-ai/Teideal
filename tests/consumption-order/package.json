@@ -1,0 +1,18 @@
+{
+  "name": "@teideal/consumption-order-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-18 acceptance suite: credit consumption order, multi-grant draws, and the customer timeline.",
+  "scripts": { "test": "vitest run" },
+  "dependencies": {
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
