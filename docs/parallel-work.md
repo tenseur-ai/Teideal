@@ -80,6 +80,79 @@ still removes the actual friction that existed before: no spec text or
 verification feedback gets manually retyped or relayed by the user --
 only "go look at issue #N" or "go look at the PR" does.
 
+## Local CLI invocation (alternate handoff, confirmed 2026-09-27)
+
+As of this session, Claude runs locally (Claude Code launched from VS
+Code), which means -- for the first time -- Claude has real shell access
+to the three developer-agent CLIs already installed on this machine.
+This adds a second way to hand off a story, alongside (not replacing)
+the GitHub-issue handoff above: invoke the CLI directly as a subprocess,
+drive it, review what it produced, rather than posting an issue and
+waiting for a human to point an agent at it. Which path to use for a
+given story is a judgment call, not a hard rule.
+
+Confirmed installed, versions as of this writing:
+- **Codex** (`codex`, CLI 0.157.1) -- on this session's PATH.
+- **Gemini** (`gemini`, CLI 0.61.0) -- on this session's PATH.
+- **Grok** (`grok`, CLI 1.0.41) -- **not on this session's shell PATH**
+  (neither the Bash tool's nor PowerShell's); installed at
+  `C:\Users\kiran\.grok\bin\grok.exe`. Invoke by full path, or add that
+  directory to PATH first.
+
+Non-interactive ("headless") one-shot invocation, confirmed from each
+tool's own `--help` (not yet run end-to-end against a real story as of
+this writing -- confirm the full loop, especially git/PR behavior below,
+before relying on it for real work):
+- **Codex**: `codex exec [OPTIONS] [PROMPT]` (alias `codex e`). Key
+  flags: `-C/--cd <DIR>` sets the working root, `-s/--sandbox
+  <read-only|workspace-write|danger-full-access>` bounds what it can do
+  (there's no separate approval prompt in `exec` mode -- sandbox mode
+  *is* the control), `--json` streams JSONL events, `-o
+  /--output-last-message <FILE>` captures the final message,
+  `--worktree` runs in a new managed git worktree instead of the given
+  directory.
+- **Gemini**: `gemini -p "<prompt>" [--include-directories DIR]
+  [--approval-mode default|auto_edit|yolo|plan] [-o/--output-format
+  text|json|stream-json]`. `-p` is what makes it headless -- without it,
+  `gemini [query]` launches the interactive TUI with the query as the
+  initial prompt instead of exiting after one response. `-w/--worktree`
+  runs it in a new git worktree.
+- **Grok**: `grok -p "<prompt>" --cwd <DIR> [--always-approve]
+  [--permission-mode
+  default|acceptEdits|auto|dontAsk|bypassPermissions|plan]
+  [--output-format plain|json|streaming-json|streaming-messages-json]`.
+  (`-p/--single` is the top-level one-shot flag, the analogue of the
+  other two tools' headless mode; `grok agent headless`/`grok agent
+  stdio` are a separate, session/relay-oriented integration path, not
+  needed for a simple one-shot invocation.) `-w/--worktree` again runs
+  it in a new git worktree.
+
+**Git/PR behavior -- none of the three CLIs has a dedicated "open a PR"
+flag** in its `--help` output. All three just run as an agent with
+shell access inside the given working directory/sandbox; if a PR gets
+opened, it's because the agent itself chose to invoke `git`/`gh` as a
+tool call, which needs `gh` authenticated in that environment and a
+sandbox/permission mode permissive enough to let it run. **Not yet
+confirmed end-to-end** -- the first time one of these is actually driven
+through a full story, confirm whether it reliably runs `git
+commit`/`gh pr create` unprompted, or whether Claude needs to do the
+commit/push/PR step itself after the CLI finishes editing the working
+tree. Until confirmed, assume the latter and verify PR creation
+manually.
+
+Given none of the three self-manages branches, the practical pattern for
+a local-CLI-driven story: Claude creates the agent's branch first
+(`git checkout -b codex/teid-44-full-export` off Claude's current
+branch, per the existing branch-naming convention), invokes the CLI with
+`--cd`/`--cwd` pointed at that checkout (or that tool's `--worktree`/`-w`
+flag, to run in an isolated git worktree instead of the main checkout --
+useful for running more than one agent concurrently without them
+stepping on each other's working tree), then handles commit/push/PR
+itself if the CLI didn't already. Independent verification before merge
+(see below) applies exactly the same regardless of which handoff path
+produced the PR -- a local CLI feeling more directly observed than a
+cloud one is not a reason to skip it.
+
 ## The per-story loop
 
 1. **Claude** pulls the story's exact `ac[]` and `tests[]` from the live
