@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { withTenant } from "../lib/db.js";
 import { logBlocked } from "../lib/security.js";
 import { recordConfigChangeWithClient } from "../lib/audit.js";
+import { requireAuth } from "../lib/auth.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -16,7 +17,7 @@ interface CustomerRow {
 }
 
 export function registerCustomerRoutes(app: FastifyInstance, pool: Pool) {
-  app.post("/customers", async (req, reply) => {
+  app.post("/customers", { preHandler: requireAuth(pool, "admin") }, async (req, reply) => {
     const principal = req.principal!;
     const body = req.body as { name?: unknown; email?: unknown };
     if (typeof body.name !== "string" || !body.name.trim() || typeof body.email !== "string" || !body.email.trim()) {
@@ -33,7 +34,7 @@ export function registerCustomerRoutes(app: FastifyInstance, pool: Pool) {
     return reply.code(201).send(row);
   });
 
-  app.get("/customers", async (req, reply) => {
+  app.get("/customers", { preHandler: requireAuth(pool, "read-only") }, async (req, reply) => {
     const principal = req.principal!;
     const rows = await withTenant(pool, principal.tenantId, async (client) => {
       const result = await client.query<CustomerRow>(`SELECT * FROM customers ORDER BY created_at DESC LIMIT 200`);
@@ -42,7 +43,7 @@ export function registerCustomerRoutes(app: FastifyInstance, pool: Pool) {
     return reply.send({ data: rows });
   });
 
-  app.get("/customers/:id", async (req, reply) => {
+  app.get("/customers/:id", { preHandler: requireAuth(pool, "read-only") }, async (req, reply) => {
     const principal = req.principal!;
     const { id } = req.params as { id: string };
     if (!UUID_RE.test(id)) {
@@ -70,7 +71,7 @@ export function registerCustomerRoutes(app: FastifyInstance, pool: Pool) {
     return reply.send(row);
   });
 
-  app.patch("/customers/:id", async (req, reply) => {
+  app.patch("/customers/:id", { preHandler: requireAuth(pool, "admin") }, async (req, reply) => {
     const principal = req.principal!;
     const { id } = req.params as { id: string };
     if (!UUID_RE.test(id)) {

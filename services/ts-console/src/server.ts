@@ -7,6 +7,7 @@ import { registerSupportRoutes } from "./routes/support.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerTenantSettingsRoutes } from "./routes/tenantSettings.js";
 import { registerAuditLogRoutes } from "./routes/auditLog.js";
+import { registerApiKeyRoutes } from "./routes/apiKeys.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -24,10 +25,12 @@ export function buildServer() {
   registerAuthRoutes(app, pool);
   registerTenantSettingsRoutes(app, pool);
   registerAuditLogRoutes(app, pool);
+  registerApiKeyRoutes(app, pool);
+
+  registerCustomerRoutes(app, pool);
 
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireAuth(pool));
-    registerCustomerRoutes(scoped, pool);
     registerSupportRoutes(scoped);
   });
 

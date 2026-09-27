@@ -103,6 +103,14 @@ jobs:
         working-directory: tests/audit-log
         run: npx vitest run
 
+      - name: Install API-key lifecycle suite dependencies
+        working-directory: tests/api-keys
+        run: npm ci
+
+      - name: Run TEID-92 acceptance suite (scope, creation, rotation, revocation, pagination, adversarial secrecy)
+        working-directory: tests/api-keys
+        run: npx vitest run
+
   # TEID-41-AC3: a release that fails the suite above must not deploy.
   # `needs: test` makes that structural -- this job is skipped outright if
   # the test job fails, not merely warned about. There is no real

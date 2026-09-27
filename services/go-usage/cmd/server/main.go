@@ -42,9 +42,8 @@ func main() {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	requireAuth := auth.Middleware(pool.Pool)
-	mux.Handle("GET /usage", requireAuth(http.HandlerFunc(h.GetUsage)))
-	mux.Handle("POST /usage", requireAuth(http.HandlerFunc(h.PostUsage)))
+	mux.Handle("GET /usage", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetUsage)))
+	mux.Handle("POST /usage", auth.Middleware(pool.Pool, "ingest-only")(http.HandlerFunc(h.PostUsage)))
 
 	server := &http.Server{
 		Addr:              addr,
