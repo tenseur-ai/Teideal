@@ -20,7 +20,7 @@ function guard(auth: ConsoleAuth) {
 
 export function consoleRoute(
   scoped: FastifyInstance,
-  method: "get" | "post" | "patch" | "delete",
+  method: "get" | "post" | "put" | "patch" | "delete",
   url: string,
   auth: ConsoleAuth,
   handler: (req: FastifyRequest, reply: FastifyReply) => unknown,

@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { validateConsumptionOrder, type ConsumptionSource } from "./consumptionOrder.js";
 
 export type BillingInterval = "monthly" | "annual";
 export type PlanStatus = "draft" | "published";
@@ -17,6 +18,7 @@ export interface PlanRecord {
   included_credits: number;
   hard_cap: number | null;
   soft_cap: number | null;
+  consumption_order: ConsumptionSource[] | null;
   status: PlanStatus;
   version: number | null;
   created_by_user_id: string | null;
@@ -35,6 +37,7 @@ export interface CreatePlanInput {
   included_credits: number;
   hard_cap: number | null;
   soft_cap: number | null;
+  consumption_order: ConsumptionSource[] | null;
   rates: PlanRate[];
 }
 
@@ -45,6 +48,7 @@ export interface PatchPlanInput {
   included_credits?: number;
   hard_cap?: number;
   soft_cap?: number;
+  consumption_order?: ConsumptionSource[];
   rates?: PlanRate[];
 }
 
@@ -58,6 +62,7 @@ interface PlanQueryRow {
   included_credits: string | number;
   hard_cap: string | number | null;
   soft_cap: string | number | null;
+  consumption_order: string[] | null;
   status: PlanStatus;
   version: number | null;
   created_by_user_id: string | null;
@@ -78,6 +83,7 @@ interface RateQueryRow {
 const CURRENCY_RE = /^[A-Z]{3}$/;
 const PLAN_SELECT = `
   p.id, p.name, p.currency, p.billing_interval, p.included_credits, p.hard_cap, p.soft_cap,
+  p.consumption_order,
   p.status, p.version, p.created_by_user_id, p.published_by_user_id,
   publisher.email AS published_by, p.published_at, p.created_at, p.updated_at`;
 
@@ -94,6 +100,12 @@ function toNumber(value: string | number): number {
 
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function shapeConsumptionOrder(value: string[] | null): ConsumptionSource[] | null {
+  if (value === null) return null;
+  const parsed = validateConsumptionOrder(value);
+  return "error" in parsed ? null : parsed.value;
 }
 
 function validateName(value: unknown, required: boolean): Field<string> {
@@ -167,6 +179,12 @@ export function validatePlanInput(body: unknown, mode: "create" | "patch"): Plan
   if ("error" in hardCap) return hardCap;
   const softCap = validateNonNegative(record.soft_cap, "soft_cap");
   if ("error" in softCap) return softCap;
+  let consumptionOrder: ConsumptionSource[] | undefined;
+  if (record.consumption_order !== undefined) {
+    const parsedOrder = validateConsumptionOrder(record.consumption_order);
+    if ("error" in parsedOrder) return parsedOrder;
+    consumptionOrder = parsedOrder.value;
+  }
 
   let rates: PlanRate[] | undefined;
   if (record.rates === undefined) rates = required ? [] : undefined;
@@ -184,6 +202,7 @@ export function validatePlanInput(body: unknown, mode: "create" | "patch"): Plan
       included_credits: includedCredits.value ?? 0,
       hard_cap: hardCap.value ?? null,
       soft_cap: softCap.value ?? null,
+      consumption_order: consumptionOrder ?? null,
       rates: rates ?? [],
     };
   }
@@ -195,6 +214,7 @@ export function validatePlanInput(body: unknown, mode: "create" | "patch"): Plan
   if (includedCredits.value !== undefined) patch.included_credits = includedCredits.value;
   if (hardCap.value !== undefined) patch.hard_cap = hardCap.value;
   if (softCap.value !== undefined) patch.soft_cap = softCap.value;
+  if (consumptionOrder !== undefined) patch.consumption_order = consumptionOrder;
   if (rates !== undefined) patch.rates = rates;
   return patch;
 }
@@ -211,6 +231,7 @@ export function shapePlanRecord(
     included_credits: toNumber(row.included_credits),
     hard_cap: row.hard_cap === null ? null : toNumber(row.hard_cap),
     soft_cap: row.soft_cap === null ? null : toNumber(row.soft_cap),
+    consumption_order: shapeConsumptionOrder(row.consumption_order),
     status: row.status,
     version: row.version === null ? null : Number(row.version),
     created_by_user_id: row.created_by_user_id,
@@ -290,8 +311,8 @@ export async function insertPlan(
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO plans (
        tenant_id, name, currency, billing_interval, included_credits,
-       hard_cap, soft_cap, status, created_by_user_id
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8)
+       hard_cap, soft_cap, consumption_order, status, created_by_user_id
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text[], 'draft', $9)
      RETURNING id`,
     [
       tenantId,
@@ -301,6 +322,7 @@ export async function insertPlan(
       input.included_credits,
       input.hard_cap,
       input.soft_cap,
+      input.consumption_order,
       createdByUserId,
     ],
   );
@@ -359,6 +381,7 @@ export async function updateDraftPlan(
     || patch.included_credits !== undefined
     || patch.hard_cap !== undefined
     || patch.soft_cap !== undefined
+    || patch.consumption_order !== undefined
     || patch.rates !== undefined;
   if (!changed) return { status: "ok", before, after: before, changed: false };
 
@@ -370,6 +393,7 @@ export async function updateDraftPlan(
        included_credits = COALESCE($6::numeric, included_credits),
        hard_cap = COALESCE($7::numeric, hard_cap),
        soft_cap = COALESCE($8::numeric, soft_cap),
+       consumption_order = CASE WHEN $9::boolean THEN $10::text[] ELSE consumption_order END,
        updated_at = now()
      WHERE id = $1 AND tenant_id = $2`,
     [
@@ -381,6 +405,8 @@ export async function updateDraftPlan(
       patch.included_credits ?? null,
       patch.hard_cap ?? null,
       patch.soft_cap ?? null,
+      patch.consumption_order !== undefined,
+      patch.consumption_order ?? null,
     ],
   );
   if (patch.rates !== undefined) await replacePlanRates(client, tenantId, planId, patch.rates);
