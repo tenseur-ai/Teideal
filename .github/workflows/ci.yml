@@ -12,6 +12,7 @@ env:
   FAKE_GOOGLE_URL: http://127.0.0.1:8090
   CI: "true"
   PGPASSWORD: postgres
+  SUPERUSER_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/teideal
 
 jobs:
   # TEID-41-AC2/T2/T5/T7/T8: the cross-tenant isolation regression suite,
@@ -92,6 +93,14 @@ jobs:
       # Google IdP started above.
       - name: Run TEID-91 acceptance suite (password/Google sign-in, mandatory MFA, idle expiry, lockout, audit log, session sweep)
         working-directory: tests/console-auth
+        run: npx vitest run
+
+      - name: Install audit-log suite dependencies
+        working-directory: tests/audit-log
+        run: npm ci
+
+      - name: Run TEID-42 acceptance suite (configuration audit, filters, CSV export, load, immutability, concurrency)
+        working-directory: tests/audit-log
         run: npx vitest run
 
   # TEID-41-AC3: a release that fails the suite above must not deploy.

@@ -8,6 +8,7 @@ import type { Pool } from "pg";
 export interface Principal {
   tenantId: string;
   tenantKey: string;
+  apiKeyId: string;
 }
 
 declare module "fastify" {
@@ -21,15 +22,15 @@ function hashKey(plaintext: string): string {
 }
 
 export async function resolveApiKey(pool: Pool, plaintextKey: string): Promise<Principal | null> {
-  const { rows } = await pool.query<{ id: string; external_key: string }>(
-    `SELECT t.id, t.external_key
+  const { rows } = await pool.query<{ id: string; external_key: string; api_key_id: string }>(
+    `SELECT t.id, t.external_key, k.id AS api_key_id
      FROM api_keys k
      JOIN tenants t ON t.id = k.issued_to_tenant_id
      WHERE k.key_hash = $1`,
     [hashKey(plaintextKey)],
   );
   if (rows.length === 0) return null;
-  return { tenantId: rows[0].id, tenantKey: rows[0].external_key };
+  return { tenantId: rows[0].id, tenantKey: rows[0].external_key, apiKeyId: rows[0].api_key_id };
 }
 
 export function requireAuth(pool: Pool) {

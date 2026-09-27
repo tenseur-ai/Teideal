@@ -1,0 +1,20 @@
+{
+  "name": "@teideal/audit-log-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-42 acceptance suite for tenant configuration auditing, export, load, and immutability.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
