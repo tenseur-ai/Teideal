@@ -9,6 +9,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerTenantSettingsRoutes } from "./routes/tenantSettings.js";
 import { registerAuditLogRoutes } from "./routes/auditLog.js";
 import { registerApiKeyRoutes } from "./routes/apiKeys.js";
+import { registerPlanRoutes } from "./routes/plans.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
@@ -31,6 +32,7 @@ export function buildServer() {
   registerTenantSettingsRoutes(app, pool);
   registerAuditLogRoutes(app, pool);
   registerApiKeyRoutes(app, pool);
+  registerPlanRoutes(app, pool);
   registerUserRoutes(app, pool);
   registerExportRoutes(app, pool);
 
