@@ -9,7 +9,7 @@
 | Release | mvp |
 | Order | 4 (within E05) |
 | Depends on | `api_keys` table (TEID-41, `db/migrations/20260926120000_init.sql`), `services/go-usage/internal/auth/auth.go`, `services/ts-console/src/lib/auth.ts`, `recordConfigChange`/`recordConfigChangeWithClient` (TEID-42, `services/ts-console/src/lib/audit.ts`) |
-| Revision | v3 -- see "Revision note" below. v2 fixed missing grants, undefined tenant isolation, and a rotation audit-count contradiction; v3 fixes a from-scratch seed failure v2 introduced. All four correctly flagged before any code was written. |
+| Revision | v4 -- see "Revision note" below. v2 fixed missing grants, undefined tenant isolation, and a rotation audit-count contradiction; v3 fixed a from-scratch seed failure v2 introduced; v4 fixes a response-contract contradiction (list vs. detail) in v3's own tenant-isolation fix. All five correctly flagged before any code was written. |
 
 ## Revision note
 
@@ -51,6 +51,17 @@ with no default anymore, so it hits the `NOT NULL` constraint on a
 clean-room rebuild (exactly what CI does). Fixed: this story now
 explicitly authorizes and requires updating that insert -- see "Schema:
 extend `api_keys`" below.
+
+**v4** fixes a contradiction v3's own fix left behind: it lumped `GET
+/api-keys` (list) and `GET /api-keys/:id` (detail) together as both
+returning `404` for cross-tenant access, but the list endpoint takes no
+key id at all -- there's no specific row to 404 on, only the tenant's
+own filtered set. Fixed: list is `200` with the other tenant's key
+simply absent from the results (the existing `WHERE
+issued_to_tenant_id` predicate already produces this -- no endpoint
+logic changes, only the DoD/test wording was wrong); detail stays
+`404`; rotate/revoke stay `403`. See "Tenant isolation here is manual,
+not RLS" below for the corrected per-endpoint contract.
 
 ## Story (verbatim from the live board)
 
@@ -240,13 +251,28 @@ policy (deliberately -- see the migration's own comment), so every
 query below must filter by `issued_to_tenant_id = req.consolePrincipal
 .tenantId` explicitly, in the query itself, not by relying on
 `withTenant`/`SET LOCAL app.tenant_id` to do it invisibly the way it
-does for RLS-protected tables elsewhere in this codebase. A key id that
-exists but belongs to another tenant must be indistinguishable from a
-key id that doesn't exist at all -- **`404`** for `GET`/`GET :id` (there
-is nothing to "forbid", the row is simply not found for this query),
-and **`403`** for `POST :id/rotate` and `POST :id/revoke` (an attempted
-write, matching `customers.ts`'s existing convention for the same
-situation). These four endpoints are new API surface reachable by a
+does for RLS-protected tables elsewhere in this codebase. Only three of
+the four endpoints take a specific key id that could belong to another
+tenant -- `GET /api-keys` (list) doesn't, it just lists the caller's own
+tenant's keys, so there is no per-key "forbid" decision to make there at
+all. The contract, endpoint by endpoint:
+
+- `GET /api-keys` (list): **`200`**, always -- another tenant's key is
+  simply never a row in the result set (the `WHERE issued_to_tenant_id`
+  predicate excludes it, same as it excludes every other tenant's
+  rows). The cross-tenant regression case for this one isn't "request
+  the other tenant's key and expect an error" -- it's "list as
+  acct_1001, confirm none of acct_1002's key ids appear anywhere in the
+  response."
+- `GET /api-keys/:id` (detail): a key id that exists but belongs to
+  another tenant must be indistinguishable from one that doesn't exist
+  at all -- **`404`** (there is nothing to "forbid", the row is simply
+  not found for this query).
+- `POST /api-keys/:id/rotate`, `POST /api-keys/:id/revoke`: **`403`**
+  (an attempted write against a row the caller can't act on, matching
+  `customers.ts`'s existing convention for the same situation).
+
+These four endpoints are new API surface reachable by a
 tenant-authenticated session, so TEID-41-T2's "every documented API
 endpoint" is not a one-time snapshot -- add cross-tenant regression
 cases for all four to `tests/cross-tenant` (acct_1001 attempting to
@@ -412,9 +438,10 @@ plaintext, not re-deriving cryptographic one-wayness.
       enforcement genuinely gates both services; AC3/AC4's timing as
       scoped above).
 - [ ] All 9 cataloged tests have real automated tests that pass.
-- [ ] Cross-tenant access to another tenant's key is proven blocked for
-      all four new endpoints (404 on the two reads, 403 on the two
-      writes), in `tests/cross-tenant`.
+- [ ] Cross-tenant isolation is proven for all four new endpoints in
+      `tests/cross-tenant`: list is `200` with the other tenant's key
+      absent from the results; detail is `404`; rotate and revoke are
+      `403`.
 - [ ] `go vet ./...` clean in `services/go-usage`; `tsc --noEmit` clean
       in `services/ts-console`.
 - [ ] `tests/cross-tenant`, `tests/console-auth`, `tests/audit-log` all
