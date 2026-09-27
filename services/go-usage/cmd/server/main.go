@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"teideal/go-usage/internal/api"
 	"teideal/go-usage/internal/auth"
@@ -49,6 +50,9 @@ func main() {
 	mux.Handle("PUT /rounding-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PutRoundingConfig)))
 	mux.Handle("POST /money/preview", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostMoneyPreview)))
 	mux.Handle("POST /money/price", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostMoneyPrice)))
+	mux.Handle("GET /customers/{id}/billing-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetBillingConfig)))
+	mux.Handle("PUT /customers/{id}/billing-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PutBillingConfig)))
+	mux.Handle("POST /period/resolve", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostResolvePeriod)))
 
 	server := &http.Server{
 		Addr:              addr,

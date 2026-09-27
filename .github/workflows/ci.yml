@@ -177,6 +177,14 @@ jobs:
         working-directory: tests/large-quantities
         run: npx vitest run
 
+      - name: Install billing-periods suite dependencies
+        working-directory: tests/billing-periods
+        run: npm ci
+
+      - name: Run TEID-96 acceptance suite (UTC storage, time zones, exclusive boundaries, DST, month-end clamping, idempotency)
+        working-directory: tests/billing-periods
+        run: npx vitest run
+
   # TEID-41-AC3: a release that fails the suite above must not deploy.
   # `needs: test` makes that structural -- this job is skipped outright if
   # the test job fails, not merely warned about. There is no real

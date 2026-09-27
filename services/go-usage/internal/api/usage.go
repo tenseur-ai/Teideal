@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -134,6 +135,7 @@ type postUsageRequest struct {
 	EventType      string          `json:"event_type"`
 	Quantity       decimal.Decimal `json:"quantity"`
 	IdempotencyKey string          `json:"idempotency_key"`
+	OccurredAt     *time.Time      `json:"occurred_at,omitempty"`
 }
 
 type rawBatchItem struct {
@@ -141,6 +143,7 @@ type rawBatchItem struct {
 	EventType      *string         `json:"event_type"`
 	Quantity       json.RawMessage `json:"quantity"`
 	IdempotencyKey *string         `json:"idempotency_key"`
+	OccurredAt     json.RawMessage `json:"occurred_at"`
 }
 
 type batchResultItem struct {
@@ -191,10 +194,28 @@ func (h *Handlers) PostUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, principal auth.Principal, bodyBytes []byte) {
-	var req postUsageRequest
-	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+	var raw struct {
+		CustomerID     string          `json:"customer_id"`
+		EventType      string          `json:"event_type"`
+		Quantity       decimal.Decimal `json:"quantity"`
+		IdempotencyKey string          `json:"idempotency_key"`
+		OccurredAt     json.RawMessage `json:"occurred_at"`
+	}
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
+	}
+	occurredAt, err := parseOptionalExplicitTimestamp(raw.OccurredAt, "occurred_at")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req := postUsageRequest{
+		CustomerID:     raw.CustomerID,
+		EventType:      raw.EventType,
+		Quantity:       raw.Quantity,
+		IdempotencyKey: raw.IdempotencyKey,
+		OccurredAt:     occurredAt,
 	}
 	if _, err := uuid.Parse(req.CustomerID); err != nil {
 		writeErr(w, http.StatusBadRequest, "customer_id must be a UUID")
@@ -230,12 +251,10 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 			customerNotVisible = true
 			return nil
 		}
-		return tx.QueryRow(ctx, `
-			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-		`, principal.TenantID, req.CustomerID, req.EventType, quantity, req.IdempotencyKey).
-			Scan(&created.ID, &created.CustomerID, &created.EventType, &createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+		return insertUsageEvent(
+			ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
+			req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+		)
 	})
 
 	if customerNotVisible {
@@ -337,6 +356,11 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			results[i] = batchResultItem{Status: "error", Reason: "idempotency_key is required"}
 			continue
 		}
+		occurredAt, err := parseOptionalExplicitTimestamp(item.OccurredAt, "occurred_at")
+		if err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: err.Error()}
+			continue
+		}
 
 		var created usageEvent
 		var createdQuantity pgtype.Numeric
@@ -350,12 +374,10 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 				customerNotVisible = true
 				return nil
 			}
-			return tx.QueryRow(ctx, `
-				INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
-				VALUES ($1, $2, $3, $4, $5)
-				RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-			`, principal.TenantID, *item.CustomerID, *item.EventType, quantity, *item.IdempotencyKey).
-				Scan(&created.ID, &created.CustomerID, &created.EventType, &createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+			return insertUsageEvent(
+				ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
+				*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+			)
 		})
 
 		if customerNotVisible {
@@ -408,6 +430,51 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 	}
 
 	writeJSON(w, http.StatusMultiStatus, map[string]any{"results": results})
+}
+
+func parseOptionalExplicitTimestamp(raw json.RawMessage, field string) (*time.Time, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("%s must be an RFC3339 timestamp with an explicit UTC offset or Z", field)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be an RFC3339 timestamp with an explicit UTC offset or Z", field)
+	}
+	return &parsed, nil
+}
+
+func insertUsageEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	customerID string,
+	eventType string,
+	quantity pgtype.Numeric,
+	idempotencyKey string,
+	occurredAt *time.Time,
+	created *usageEvent,
+	createdQuantity *pgtype.Numeric,
+) error {
+	if occurredAt == nil {
+		return tx.QueryRow(ctx, `
+			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
+		`, tenantID, customerID, eventType, quantity, idempotencyKey).
+			Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+	}
+
+	return tx.QueryRow(ctx, `
+		INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
+	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt).
+		Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
 }
 
 type usageSummaryResponse struct {
