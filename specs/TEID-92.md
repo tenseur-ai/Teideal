@@ -9,12 +9,12 @@
 | Release | mvp |
 | Order | 4 (within E05) |
 | Depends on | `api_keys` table (TEID-41, `db/migrations/20260926120000_init.sql`), `services/go-usage/internal/auth/auth.go`, `services/ts-console/src/lib/auth.ts`, `recordConfigChange`/`recordConfigChangeWithClient` (TEID-42, `services/ts-console/src/lib/audit.ts`) |
-| Revision | v2 -- see "Revision note" below. Fixes missing grants, undefined tenant isolation on the new endpoints, and a rotation audit-count contradiction, all correctly flagged before any code was written. |
+| Revision | v3 -- see "Revision note" below. v2 fixed missing grants, undefined tenant isolation, and a rotation audit-count contradiction; v3 fixes a from-scratch seed failure v2 introduced. All four correctly flagged before any code was written. |
 
 ## Revision note
 
-Three real gaps, caught before writing any code -- exactly the right
-call, not something to have guessed around:
+**v2** fixed three real gaps, caught before writing any code -- exactly
+the right call, not something to have guessed around:
 
 1. **Missing grants.** `teideal_app` has only `SELECT` on `api_keys`
    (TEID-41's migration, line 56) -- every write this story needs
@@ -38,6 +38,19 @@ call, not something to have guessed around:
    key, describing both the expiry and what it rotated to); the new
    key's row is inserted directly, not through the create endpoint's
    audit-writing code path.
+
+**v3** fixes one more, found on the next read-through rather than
+guessed around: v2's migration drops `scope`/`environment`'s temporary
+`DEFAULT`s immediately after adding them, reasoning (wrongly) that this
+only mattered for backfilling already-existing rows. On the from-scratch
+flow this repo actually tests, migrations run first against an *empty*
+`api_keys` table -- there's nothing to backfill -- and
+`db/seed-test-fixtures.sh`'s existing `api_keys` insert (no `scope`/
+`environment` in its column list) runs *after*, straight into a table
+with no default anymore, so it hits the `NOT NULL` constraint on a
+clean-room rebuild (exactly what CI does). Fixed: this story now
+explicitly authorizes and requires updating that insert -- see "Schema:
+extend `api_keys`" below.
 
 ## Story (verbatim from the live board)
 
@@ -126,11 +139,22 @@ needs `INSERT` (create, and the new row a rotation produces) and
 and `last_used_at` on every successful resolve) -- without this grant
 every write in this spec fails with Postgres permission error `42501`.
 
-(The `DEFAULT`s exist only so the `ALTER TABLE` succeeds against
-existing rows from TEID-41's dev-fixture seed data; dropped immediately
-after so every *new* insert must specify both explicitly -- TEID-41's
-fixture keys keep working as `admin`/`sandbox`, which is what they were
-implicitly before this story.)
+The `DEFAULT`s matter for a hypothetical already-populated production
+`api_keys` table (this migration backfilling existing rows on an
+upgrade) -- they do **not** help the from-scratch flow this repo
+actually tests: migrations always run first against an *empty*
+`api_keys` table (`db/setup-local.sh`, before any seed script runs), so
+there is nothing for the default to backfill, and immediately dropping
+it means the seed script's own `INSERT` -- which runs *after* this
+migration, into a table with no default anymore -- must supply `scope`/
+`environment` explicitly or hit the `NOT NULL` constraint. It does not
+today. **This story must update `db/seed-test-fixtures.sh`'s existing
+`api_keys` insert** (currently `INSERT INTO api_keys
+(issued_to_tenant_id, key_hash, label) VALUES ...`, no `scope`/
+`environment`) to add `scope, environment` with values `'admin',
+'sandbox'` for both fixture keys -- matching what those keys behaved as
+implicitly before this story existed, so TEID-41/TEID-91's regression
+suites see no behavior change.
 
 `creator_user_id` is nullable: keys created by TEID-41's seed script
 (`db/seed-test-fixtures.sh`) have no console user behind them and stay
@@ -351,6 +375,10 @@ plaintext, not re-deriving cryptographic one-wayness.
 ## File layout
 
 - `db/migrations/<timestamp>_api_keys_lifecycle.sql`
+- `db/seed-test-fixtures.sh` -- add `scope, environment` (`'admin',
+  'sandbox'`) to the existing `api_keys` insert; required for the
+  migration above to not break a from-scratch rebuild (see "Revision
+  note" v3).
 - `services/go-usage/internal/auth/auth.go` -- `Scope` on `Principal`,
   scope-aware `Middleware`, revocation/expiry check, `last_used_at`
   update.
