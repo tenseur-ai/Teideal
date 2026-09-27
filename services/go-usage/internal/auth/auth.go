@@ -1,8 +1,4 @@
-// Package auth resolves an API key to a tenant. It is intentionally minimal:
-// one hash lookup, no scopes, no rotation, no revocation. TEID-92 (API key
-// lifecycle) and TEID-43 (RBAC) extend this table and this check later --
-// this is not a smaller version of those features, it is the subset TEID-41
-// needs to attribute a request to a tenant at all.
+// Package auth resolves an API key to a tenant and enforces its API scope.
 package auth
 
 import (
@@ -20,6 +16,7 @@ import (
 type Principal struct {
 	TenantID  string
 	TenantKey string // e.g. "acct_1001", for logging/tests only
+	Scope     string
 }
 
 var ErrNoKey = errors.New("auth: missing or malformed authorization header")
@@ -37,26 +34,33 @@ func hashKey(plaintext string) string {
 // exactly what this call produces.
 func Resolve(ctx context.Context, pool *pgxpool.Pool, plaintextKey string) (Principal, error) {
 	row := pool.QueryRow(ctx, `
-		SELECT t.id, t.external_key
+		SELECT k.id, t.id, t.external_key, k.scope
 		FROM api_keys k
 		JOIN tenants t ON t.id = k.issued_to_tenant_id
 		WHERE k.key_hash = $1
+		  AND k.revoked_at IS NULL
+		  AND (k.expires_at IS NULL OR k.expires_at > now())
 	`, hashKey(plaintextKey))
 
 	var p Principal
-	if err := row.Scan(&p.TenantID, &p.TenantKey); err != nil {
+	var apiKeyID string
+	if err := row.Scan(&apiKeyID, &p.TenantID, &p.TenantKey, &p.Scope); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Principal{}, ErrUnknownKey
 		}
 		return Principal{}, err
 	}
+	// last_used_at is informational rather than a security control. Do not
+	// reject an otherwise valid request if this best-effort display update
+	// loses a race or transiently fails.
+	_, _ = pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, apiKeyID)
 	return p, nil
 }
 
 // Middleware authenticates every request and stores the resolved Principal
 // on the request context. Handlers that need no tenant context (health
 // checks) should be mounted outside this middleware.
-func Middleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
+func Middleware(pool *pgxpool.Pool, requiredScope string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			header := r.Header.Get("Authorization")
@@ -70,6 +74,10 @@ func Middleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			principal, err := Resolve(r.Context(), pool, key)
 			if err != nil {
 				http.Error(w, `{"error":"invalid api key"}`, http.StatusUnauthorized)
+				return
+			}
+			if principal.Scope != requiredScope && principal.Scope != "admin" {
+				http.Error(w, `{"error":"api key scope does not permit this operation"}`, http.StatusForbidden)
 				return
 			}
 

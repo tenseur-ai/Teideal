@@ -32,9 +32,9 @@ KEY2_HASH="$(printf '%s' "$KEY2_PLAINTEXT" | sha256sum | cut -d' ' -f1)"
 # the *_seed_dev.sql migration).
 run_psql -c "DELETE FROM api_keys WHERE key_hash IN ('${KEY1_HASH}', '${KEY2_HASH}');"
 run_psql -c "
-INSERT INTO api_keys (issued_to_tenant_id, key_hash, label) VALUES
-  ('${TENANT1_ID}', '${KEY1_HASH}', 'test-fixture'),
-  ('${TENANT2_ID}', '${KEY2_HASH}', 'test-fixture');
+INSERT INTO api_keys (issued_to_tenant_id, key_hash, label, scope, environment) VALUES
+  ('${TENANT1_ID}', '${KEY1_HASH}', 'test-fixture', 'admin', 'sandbox'),
+  ('${TENANT2_ID}', '${KEY2_HASH}', 'test-fixture', 'admin', 'sandbox');
 "
 
 # Fixed customer IDs (rather than delete-then-insert) so re-running this
