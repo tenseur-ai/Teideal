@@ -136,20 +136,45 @@ sandbox/permission mode permissive enough to let it run.
 
 **Confirmed end-to-end, three real stories in (TEID-44 and TEID-94 via
 Codex, TEID-16 via Grok):**
-- **Codex, run with `--sandbox workspace-write` against a `git worktree`
-  checkout, cannot commit at all.** The worktree's real Git metadata
-  lives at `<main-repo>/.git/worktrees/<name>/`, outside the sandboxed
-  workdir, so `git commit` fails creating `index.lock` there --
-  confirmed twice, independently, on two different stories. **Passing
-  `--add-dir "<main-repo>/.git"` does not fix this**, despite the flag's
-  own description ("additional directories that should be writable") --
-  the startup banner confirms the sandbox accepted the path as writable,
-  but the actual commit still fails with the same permission error. This
-  looks like a real gap in how that sandbox mode is implemented on native
-  Windows specifically, not a one-off misconfiguration -- don't spend
-  time retrying it; budget for Claude to commit Codex's work from outside
-  the sandbox every time, on this platform, until Codex ships a fix or a
-  different flag actually works.
+- **Codex, run with `--sandbox workspace-write`, cannot commit its own
+  work at all -- confirmed on both a `git worktree` checkout and a full
+  clone, which rules out "the worktree's `.git` lives outside the
+  sandbox" as the actual cause.** First finding (TEID-44, TEID-94): on a
+  worktree checkout, `git commit` fails creating `index.lock` at
+  `<main-repo>/.git/worktrees/<name>/`, outside the sandboxed workdir --
+  and passing `--add-dir "<main-repo>/.git"` does not fix it, despite the
+  startup banner confirming the sandbox accepted that path as writable.
+  Second finding (a deliberate, minimal test after TEID-16/TEID-94
+  shipped): switching Codex to a **full clone**, whose `.git` directory
+  is entirely self-contained *inside* the sandboxed workdir with nothing
+  external to grant, **still fails the identical way** -- a normal file
+  at the clone root was created without issue in the same run, but
+  `git add`/`git commit` still got "Permission denied" creating
+  `.git/index.lock`. Since both the worktree-external-metadata theory and
+  the fix for it are now ruled out by that second test, the actual cause
+  looks like Codex's sandbox denylisting `.git` paths specifically as a
+  category, regardless of `--sandbox workspace-write`'s general workdir
+  grant -- most plausibly intentional (stopping a sandboxed agent from
+  touching version-control internals directly, e.g. rewriting history or
+  hiding a commit), not a bug. **Don't spend more time trying to
+  configure around this.** Claude reviews Codex's diff and commits it
+  after every run, on this platform -- treat that as a permanent step in
+  the process, not a workaround to eventually remove. `scripts/
+  spawn-codex-agent.sh` codifies the working parts of this (worktree
+  setup, the npm-cache fix below) without re-attempting the disproven
+  clone workaround.
+- **The npm-cache-in-a-nested-directory failure (a separate, unrelated
+  issue that also hit Codex on both TEID-44 and TEID-94) does have a
+  real fix**: pin npm's cache via the `npm_config_cache` **environment
+  variable** when launching `codex exec`, not a `.npmrc` file. npm only
+  reads a project `.npmrc` from the exact current working directory, not
+  parent directories, so a `.npmrc` at the worktree root never helped
+  `npm install` running inside a nested `tests/<name>/` directory with
+  its own `package.json` -- Claude had to rediscover and patch this by
+  hand, per-directory, every time. An env var applies to every npm
+  invocation in the whole process tree regardless of cwd depth, so this
+  class of failure shouldn't recur. `scripts/spawn-codex-agent.sh` sets
+  this by default.
 - **Grok, run with no `--sandbox` flag (so no sandboxing at all) and
   `--permission-mode bypassPermissions`, commits, pushes, and opens its
   own PR successfully**, unassisted, referencing the handoff issue number
