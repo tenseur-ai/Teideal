@@ -4,6 +4,8 @@ import type { Pool, PoolClient } from "pg";
 import { recordConfigChangeWithClient } from "../lib/audit.js";
 import { withTenant } from "../lib/db.js";
 import { requireSession } from "../lib/sessionAuth.js";
+import { consoleRoute } from "../lib/roleGuard.js";
+import { ROLES } from "../lib/users.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCOPES = new Set(["ingest-only", "read-only", "admin"]);
@@ -87,7 +89,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireSession(pool));
 
-    scoped.post("/api-keys", async (req, reply) => {
+    consoleRoute(scoped, "post", "/api-keys", { role: ["Owner", "Developer"] }, async (req, reply) => {
       const body = req.body as { scope?: unknown; environment?: unknown; label?: unknown };
       if (typeof body.scope !== "string" || !SCOPES.has(body.scope)) {
         return reply.code(400).send({ error: "scope must be ingest-only, read-only, or admin" });
@@ -121,7 +123,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       return reply.code(201).send(creationResponse(created.row, created.plaintext));
     });
 
-    scoped.get("/api-keys", async (req, reply) => {
+    consoleRoute(scoped, "get", "/api-keys", { role: [...ROLES] }, async (req, reply) => {
       const query = req.query as { limit?: unknown; cursor?: unknown };
       if (query.limit !== undefined && typeof query.limit !== "string") {
         return reply.code(400).send({ error: "limit must be an integer" });
@@ -158,7 +160,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send({ data, cursor: hasMore ? data[data.length - 1].id : null });
     });
 
-    scoped.get("/api-keys/:id", async (req, reply) => {
+    consoleRoute(scoped, "get", "/api-keys/:id", { role: [...ROLES] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       if (!UUID_RE.test(id)) return reply.code(400).send({ error: "id must be a UUID" });
       const tenantId = req.consolePrincipal!.tenantId;
@@ -172,7 +174,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send(row);
     });
 
-    scoped.post("/api-keys/:id/rotate", async (req, reply) => {
+    consoleRoute(scoped, "post", "/api-keys/:id/rotate", { role: ["Owner", "Developer"] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       if (!UUID_RE.test(id)) return reply.code(400).send({ error: "id must be a UUID" });
       const body = (req.body ?? {}) as { grace_period_hours?: unknown };
@@ -213,7 +215,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       return reply.code(201).send(creationResponse(rotated.row, rotated.plaintext));
     });
 
-    scoped.post("/api-keys/:id/revoke", async (req, reply) => {
+    consoleRoute(scoped, "post", "/api-keys/:id/revoke", { role: ["Owner", "Developer"] }, async (req, reply) => {
       const { id } = req.params as { id: string };
       if (!UUID_RE.test(id)) return reply.code(400).send({ error: "id must be a UUID" });
       const { tenantId, userId } = req.consolePrincipal!;

@@ -35,7 +35,9 @@ VALUES
   ('00000000-0000-0000-0000-0000a0001003', '${TENANT1_ID}', 'finance@acmeco.com',
    crypt('FinancePass123!', gen_salt('bf')), 'Finance', NULL, NULL),
   ('00000000-0000-0000-0000-0000a0001004', '${TENANT1_ID}', 'support@acmeco.com',
-   crypt('SupportPass123!', gen_salt('bf')), 'Support', NULL, NULL)
+   crypt('SupportPass123!', gen_salt('bf')), 'Support', NULL, NULL),
+  ('00000000-0000-0000-0000-0000a0001005', '${TENANT1_ID}', 'developer@acmeco.com',
+   crypt('DeveloperPass123!', gen_salt('bf')), 'Developer', NULL, NULL)
 ON CONFLICT (id) DO UPDATE SET
   password_hash = excluded.password_hash,
   role = excluded.role,
@@ -56,3 +58,4 @@ echo "  owner@acmeco.com   / OwnerPass123!   (Owner, MFA enrolled, secret ${OWNE
 echo "  billing@acmeco.com / BillingPass123! (Billing Admin, MFA enrolled, secret ${BILLING_MFA_SECRET})"
 echo "  finance@acmeco.com / FinancePass123! (Finance, no MFA)"
 echo "  support@acmeco.com / SupportPass123! (Support, no MFA)"
+echo "  developer@acmeco.com / DeveloperPass123! (Developer, no MFA)"

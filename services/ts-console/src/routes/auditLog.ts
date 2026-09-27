@@ -3,6 +3,8 @@ import type { FastifyInstance } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "../lib/db.js";
 import { requireSession } from "../lib/sessionAuth.js";
+import { consoleRoute } from "../lib/roleGuard.js";
+import { ROLES } from "../lib/users.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EXPORT_BATCH_SIZE = 10_000;
@@ -170,7 +172,7 @@ export function registerAuditLogRoutes(app: FastifyInstance, pool: Pool) {
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireSession(pool));
 
-    scoped.get("/audit-log", async (req, reply) => {
+    consoleRoute(scoped, "get", "/audit-log", { role: [...ROLES] }, async (req, reply) => {
       const parsed = parseFilters(req.query as AuditFilterQuery);
       if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
 
@@ -181,7 +183,7 @@ export function registerAuditLogRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send({ data: rows });
     });
 
-    scoped.get("/audit-log/export.csv", async (req, reply) => {
+    consoleRoute(scoped, "get", "/audit-log/export.csv", { role: [...ROLES] }, async (req, reply) => {
       const parsed = parseFilters(req.query as AuditFilterQuery);
       if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
 
@@ -192,7 +194,7 @@ export function registerAuditLogRoutes(app: FastifyInstance, pool: Pool) {
 
     const immutable = (_req: unknown, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) =>
       reply.code(405).send({ error: "the audit log is append-only and cannot be edited or deleted" });
-    scoped.patch("/audit-log/:id", immutable);
-    scoped.delete("/audit-log/:id", immutable);
+    consoleRoute(scoped, "patch", "/audit-log/:id", { role: [...ROLES] }, immutable);
+    consoleRoute(scoped, "delete", "/audit-log/:id", { role: [...ROLES] }, immutable);
   });
 }

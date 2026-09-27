@@ -5,10 +5,11 @@ export interface ApiResponse<T = any> {
 
 export async function call(
   url: string,
-  opts: { method?: string; apiKey?: string; adminKey?: string; body?: unknown } = {},
+  opts: { method?: string; apiKey?: string; token?: string; adminKey?: string; body?: unknown } = {},
 ): Promise<ApiResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (opts.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+  if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
   if (opts.adminKey) headers["X-Internal-Admin-Key"] = opts.adminKey;
 
   const res = await fetch(url, {
