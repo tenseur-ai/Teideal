@@ -1,0 +1,15 @@
+{
+  "name": "@teideal/currency-rounding-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-94 acceptance suite: currency precision, exact decimal arithmetic, rounding configuration, and adjustment reporting.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

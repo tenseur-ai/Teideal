@@ -63,6 +63,10 @@ jobs:
           PORT=8082 DATABASE_URL="$DATABASE_URL" /tmp/go-usage &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8082/healthz && break; sleep 1; done
 
+      - name: Reject floating-point types in money code (TEID-94-T2/T6)
+        working-directory: services/go-usage
+        run: go run ./tools/checkmoney ./internal/money
+
       - name: Install and start the fake Google IdP (TEID-91-T1/T7 test double)
         working-directory: tests/console-auth
         run: |
@@ -139,6 +143,14 @@ jobs:
 
       - name: Run TEID-30 acceptance suite (single & batch ingestion, durability, load, partial batch rejections, read-after-write lag, batch size enforcement, adversarial)
         working-directory: tests/usage-ingestion
+        run: npx vitest run
+
+      - name: Install currency rounding suite dependencies
+        working-directory: tests/currency-rounding
+        run: npm ci
+
+      - name: Run TEID-94 acceptance suite (currency precision, exact decimal arithmetic, rounding points, methods, adjustments, adversarial validation)
+        working-directory: tests/currency-rounding
         run: npx vitest run
 
   # TEID-41-AC3: a release that fails the suite above must not deploy.
