@@ -1,6 +1,6 @@
 # STATUS-TEID-16
 
-Story TEID-16 (define plans as configuration) is implemented on branch `grok/teid-16-plans-as-config`. This file records what was actually run in this working tree. A later from-scratch rebuild should not treat these results as a substitute for its own run.
+Story TEID-16 (define plans as configuration) is implemented on branch `grok/teid-16-plans-as-config`. Pull request: https://github.com/Sathyanarayan-Kiran/Teideal/pull/8 (base `claude/eager-brown-dlqfl4`). This file records what was actually run in this working tree. A later from-scratch rebuild should not treat these results as a substitute for its own run.
 
 ## Implemented
 
