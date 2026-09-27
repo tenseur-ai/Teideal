@@ -1,11 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"math"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +32,22 @@ type usageEvent struct {
 	Quantity       float64   `json:"quantity"`
 	IdempotencyKey string    `json:"idempotency_key"`
 	OccurredAt     time.Time `json:"occurred_at"`
+}
+
+var eventTypeRegex = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
+
+func validateEventType(et string) error {
+	if !eventTypeRegex.MatchString(et) {
+		return errors.New("event_type must match ^[A-Za-z0-9_.:-]{1,128}$")
+	}
+	return nil
+}
+
+func validateQuantity(q float64) error {
+	if q < 0 || math.IsNaN(q) || math.IsInf(q, 0) {
+		return errors.New("quantity must be a non-negative number")
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -99,6 +119,24 @@ type postUsageRequest struct {
 	IdempotencyKey string  `json:"idempotency_key"`
 }
 
+type rawBatchItem struct {
+	CustomerID     *string         `json:"customer_id"`
+	EventType      *string         `json:"event_type"`
+	Quantity       json.RawMessage `json:"quantity"`
+	IdempotencyKey *string         `json:"idempotency_key"`
+}
+
+type batchResultItem struct {
+	Status         string     `json:"status"`
+	ID             string     `json:"id,omitempty"`
+	CustomerID     string     `json:"customer_id,omitempty"`
+	EventType      string     `json:"event_type,omitempty"`
+	Quantity       *float64   `json:"quantity,omitempty"`
+	IdempotencyKey string     `json:"idempotency_key,omitempty"`
+	OccurredAt     *time.Time `json:"occurred_at,omitempty"`
+	Reason         string     `json:"reason,omitempty"`
+}
+
 // PostUsage handles POST /usage. tenant_id is always taken from the
 // authenticated principal, never from the request body, so a client cannot
 // simply set tenant_id in the payload to write into another tenant's
@@ -112,8 +150,32 @@ func (h *Handlers) PostUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	trimmed := bytes.TrimSpace(bodyBytes)
+	if len(trimmed) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if trimmed[0] == '[' {
+		h.postUsageBatch(w, r, principal, trimmed)
+		return
+	} else if trimmed[0] == '{' {
+		h.postUsageSingle(w, r, principal, trimmed)
+		return
+	}
+
+	writeErr(w, http.StatusBadRequest, "invalid JSON body")
+}
+
+func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, principal auth.Principal, bodyBytes []byte) {
 	var req postUsageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
@@ -123,6 +185,14 @@ func (h *Handlers) PostUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.EventType == "" || req.IdempotencyKey == "" {
 		writeErr(w, http.StatusBadRequest, "event_type and idempotency_key are required")
+		return
+	}
+	if err := validateEventType(req.EventType); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateQuantity(req.Quantity); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -169,3 +239,133 @@ func (h *Handlers) PostUsage(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, created)
 }
+
+func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, principal auth.Principal, bodyBytes []byte) {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawItems); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if len(rawItems) == 0 {
+		writeErr(w, http.StatusBadRequest, "batch must contain at least 1 event")
+		return
+	}
+	if len(rawItems) > 1000 {
+		writeErr(w, http.StatusBadRequest, "batch exceeds 1000 events")
+		return
+	}
+
+	results := make([]batchResultItem, len(rawItems))
+	for i, raw := range rawItems {
+		var item rawBatchItem
+		if err := json.Unmarshal(raw, &item); err != nil {
+			results[i] = batchResultItem{
+				Status: "error",
+				Reason: "invalid event payload",
+			}
+			continue
+		}
+
+		if item.CustomerID == nil {
+			results[i] = batchResultItem{Status: "error", Reason: "customer_id must be a UUID"}
+			continue
+		}
+		if _, err := uuid.Parse(*item.CustomerID); err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: "customer_id must be a UUID"}
+			continue
+		}
+
+		if item.EventType == nil {
+			results[i] = batchResultItem{Status: "error", Reason: "event_type must match ^[A-Za-z0-9_.:-]{1,128}$"}
+			continue
+		}
+		if err := validateEventType(*item.EventType); err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: err.Error()}
+			continue
+		}
+
+		if len(item.Quantity) == 0 || string(item.Quantity) == "null" {
+			results[i] = batchResultItem{Status: "error", Reason: "quantity must be a non-negative number"}
+			continue
+		}
+		var qty float64
+		if err := json.Unmarshal(item.Quantity, &qty); err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: "quantity must be a non-negative number"}
+			continue
+		}
+		if err := validateQuantity(qty); err != nil {
+			results[i] = batchResultItem{Status: "error", Reason: err.Error()}
+			continue
+		}
+
+		if item.IdempotencyKey == nil || *item.IdempotencyKey == "" {
+			results[i] = batchResultItem{Status: "error", Reason: "idempotency_key is required"}
+			continue
+		}
+
+		var created usageEvent
+		var customerNotVisible bool
+		err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1)`, *item.CustomerID).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				customerNotVisible = true
+				return nil
+			}
+			return tx.QueryRow(ctx, `
+				INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
+				VALUES ($1, $2, $3, $4, $5)
+				RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
+			`, principal.TenantID, *item.CustomerID, *item.EventType, qty, *item.IdempotencyKey).
+				Scan(&created.ID, &created.CustomerID, &created.EventType, &created.Quantity, &created.IdempotencyKey, &created.OccurredAt)
+		})
+
+		if customerNotVisible {
+			_ = security.LogBlocked(r.Context(), h.Pool.Pool, security.BlockedAttempt{
+				ActingTenantID: principal.TenantID,
+				Endpoint:       "/usage",
+				Method:         http.MethodPost,
+				Detail:         "customer_id not visible to caller's tenant",
+				ResolvedAction: "blocked_customer_not_visible",
+			})
+			results[i] = batchResultItem{Status: "error", Reason: "customer not found for this tenant"}
+			continue
+		}
+
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				var existingID string
+				lookupErr := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT id FROM usage_events WHERE idempotency_key = $1`, *item.IdempotencyKey).Scan(&existingID)
+				})
+				if lookupErr == nil {
+					results[i] = batchResultItem{
+						Status: "duplicate",
+						ID:     existingID,
+					}
+					continue
+				}
+			}
+			log.Printf("PostUsage batch item %d: %v", i, err)
+			results[i] = batchResultItem{Status: "error", Reason: "failed to record usage event"}
+			continue
+		}
+
+		results[i] = batchResultItem{
+			Status:         "created",
+			ID:             created.ID,
+			CustomerID:     created.CustomerID,
+			EventType:      created.EventType,
+			Quantity:       &created.Quantity,
+			IdempotencyKey: created.IdempotencyKey,
+			OccurredAt:     &created.OccurredAt,
+		}
+	}
+
+	writeJSON(w, http.StatusMultiStatus, map[string]any{"results": results})
+}
+
