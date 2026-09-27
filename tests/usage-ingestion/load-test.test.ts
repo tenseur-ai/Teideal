@@ -81,30 +81,33 @@ describe("TEID-30 Sustained Load & Latency Lag Tests", () => {
     expect(p99SecondHalf).toBeLessThanOrEqual(Math.max(p99FirstHalf * 2, p99FirstHalf + 50, 200));
   });
 
-  // TEID-30-T5 / TEID-30-T7: Read-after-write balance / queryability lag under background load
-  it("TEID-30-T5 / TEID-30-T7: event is queryable via GET /usage within 2,000ms of ack under background load", async () => {
+  // TEID-30-T5 / TEID-30-T7: Read-after-write balance / queryability lag under concurrent background load
+  it("TEID-30-T5 / TEID-30-T7: event is queryable via GET /usage within 2,000ms of ack under concurrent background load", async () => {
     const rate = process.env.LOAD_TEST_EVENTS_PER_SEC ? parseInt(process.env.LOAD_TEST_EVENTS_PER_SEC, 10) : 500;
+    const concurrency = Math.min(20, Math.max(2, Math.floor(rate / 50)));
     const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const markedCustomer = fx.tenant2.customerId;
     const markedApiKey = fx.tenant2.apiKey;
 
     let stopBackground = false;
-    const bgWorker = (async () => {
-      let counter = 0;
-      while (!stopBackground) {
-        counter++;
-        await call(`${GO_USAGE_URL}/usage`, {
-          method: "POST",
-          apiKey: fx.tenant1.apiKey,
-          body: {
-            customer_id: fx.tenant1.customerId,
-            event_type: "bg_load",
-            quantity: 1,
-            idempotency_key: `t5-bg-${runId}-${counter}`,
-          },
-        }).catch(() => {});
-      }
-    })();
+    const bgWorkers = Promise.all(
+      Array.from({ length: concurrency }, async (_, workerIdx) => {
+        let counter = 0;
+        while (!stopBackground) {
+          counter++;
+          await call(`${GO_USAGE_URL}/usage`, {
+            method: "POST",
+            apiKey: fx.tenant1.apiKey,
+            body: {
+              customer_id: fx.tenant1.customerId,
+              event_type: "bg_load",
+              quantity: 1,
+              idempotency_key: `t5-bg-${runId}-w${workerIdx}-${counter}`,
+            },
+          }).catch(() => {});
+        }
+      })
+    );
 
     // Allow background load to spin up brief moment
     await new Promise((r) => setTimeout(r, 200));
@@ -145,7 +148,7 @@ describe("TEID-30 Sustained Load & Latency Lag Tests", () => {
     }
 
     stopBackground = true;
-    await bgWorker;
+    await bgWorkers;
 
     // TEID-30-T5 & T7 assertion: lag from ack to queryability is under 2,000ms
     expect(visibleTime).toBeGreaterThanOrEqual(0);
