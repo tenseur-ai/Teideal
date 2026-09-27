@@ -43,10 +43,12 @@ func main() {
 	})
 
 	mux.Handle("GET /usage", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetUsage)))
+	mux.Handle("GET /usage/summary", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetUsageSummary)))
 	mux.Handle("POST /usage", auth.Middleware(pool.Pool, "ingest-only")(http.HandlerFunc(h.PostUsage)))
 	mux.Handle("GET /rounding-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetRoundingConfig)))
 	mux.Handle("PUT /rounding-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PutRoundingConfig)))
 	mux.Handle("POST /money/preview", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostMoneyPreview)))
+	mux.Handle("POST /money/price", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostMoneyPrice)))
 
 	server := &http.Server{
 		Addr:              addr,

@@ -161,6 +161,14 @@ jobs:
         working-directory: tests/currency-rounding
         run: npx vitest run
 
+      - name: Install large-quantities suite dependencies
+        working-directory: tests/large-quantities
+        run: npm ci
+
+      - name: Run TEID-95 acceptance suite (sub-cent prices, exact trillion-unit quantities, aggregation, caps, precision validation)
+        working-directory: tests/large-quantities
+        run: npx vitest run
+
   # TEID-41-AC3: a release that fails the suite above must not deploy.
   # `needs: test` makes that structural -- this job is skipped outright if
   # the test job fails, not merely warned about. There is no real

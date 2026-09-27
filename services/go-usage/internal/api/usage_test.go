@@ -2,6 +2,8 @@ package api
 
 import (
 	"testing"
+
+	"github.com/shopspring/decimal"
 )
 
 func TestValidateEventType(t *testing.T) {
@@ -34,17 +36,22 @@ func TestValidateEventType(t *testing.T) {
 }
 
 func TestValidateQuantity(t *testing.T) {
-	validQuantities := []float64{0, 1, 10.5, 999999}
+	validQuantities := []string{"0", "1", "10.5", "999999", "1000000000000"}
 	for _, q := range validQuantities {
-		if err := validateQuantity(q); err != nil {
-			t.Errorf("expected valid quantity %f, got error: %v", q, err)
+		if err := validateQuantity(decimal.RequireFromString(q)); err != nil {
+			t.Errorf("expected valid quantity %s, got error: %v", q, err)
 		}
 	}
 
-	invalidQuantities := []float64{-1, -0.001, -500}
+	invalidQuantities := []string{"-1", "-0.001", "-500", "1000000000001"}
 	for _, q := range invalidQuantities {
-		if err := validateQuantity(q); err == nil {
-			t.Errorf("expected invalid quantity %f to return error, got nil", q)
+		if err := validateQuantity(decimal.RequireFromString(q)); err == nil {
+			t.Errorf("expected invalid quantity %s to return error, got nil", q)
 		}
+	}
+
+	capError := validateQuantity(decimal.RequireFromString("1000000000001"))
+	if capError == nil || capError.Error() != "quantity must not exceed 1000000000000 (one trillion)" {
+		t.Fatalf("expected explicit one-trillion cap error, got %v", capError)
 	}
 }

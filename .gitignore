@@ -16,3 +16,5 @@ tests/cross-tenant/.fixtures.json
 # Scratch output from ad-hoc local type-checks/test runs
 .tmp-run/
 .tmp-*
+.gocache-*/
+.npm-cache/
