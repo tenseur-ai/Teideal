@@ -205,7 +205,11 @@ export function registerExportFormatRoute(
   docPath: string = process.env.EXPORT_FORMAT_DOC_PATH ?? DEFAULT_FORMAT_DOC_PATH,
 ): void {
   app.get("/support/export-format-doc", async (req, reply) => {
-    const document = await readFile(docPath, "utf8");
+    // Normalized to "\n" regardless of how this file was checked out on the
+    // host filesystem (Git checks it out with CRLF on Windows via
+    // core.autocrlf), so the response a consumer parses is deterministic
+    // across hosts, not dependent on which OS happened to serve it.
+    const document = (await readFile(docPath, "utf8")).replace(/\r\n/g, "\n");
     const generated = buildExportFormatDocument();
     if (document !== generated) {
       throw new Error("docs/export-format.md is out of sync with exportSources.ts");
