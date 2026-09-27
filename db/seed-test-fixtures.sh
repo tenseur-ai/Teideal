@@ -29,7 +29,7 @@ KEY2_HASH="$(printf '%s' "$KEY2_PLAINTEXT" | sha256sum | cut -d' ' -f1)"
 
 # Idempotent: delete-then-insert is fine for dev/test fixture data (never
 # run against a real environment -- see the warning at the top of
-# db/migrations/0002_seed_dev.sql).
+# the *_seed_dev.sql migration).
 run_psql -c "DELETE FROM api_keys WHERE key_hash IN ('${KEY1_HASH}', '${KEY2_HASH}');"
 run_psql -c "
 INSERT INTO api_keys (issued_to_tenant_id, key_hash, label) VALUES
