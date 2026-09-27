@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { withTenant } from "../lib/db.js";
 import { logBlocked } from "../lib/security.js";
+import { recordConfigChangeWithClient } from "../lib/audit.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -88,13 +89,25 @@ export function registerCustomerRoutes(app: FastifyInstance, pool: Pool) {
       // too, so a row belonging to another tenant simply doesn't match --
       // this is what stops the id-substitution attack (TEID-41-T8): the
       // WHERE id = $1 is true, but the row isn't visible, so zero rows update.
+      const beforeResult = await client.query<CustomerRow>(`SELECT * FROM customers WHERE id = $1 FOR UPDATE`, [id]);
+      const before = beforeResult.rows[0];
+      if (!before) return null;
+
       const { rows } = await client.query<CustomerRow>(
         `UPDATE customers SET name = COALESCE($2, name), email = COALESCE($3, email), updated_at = now()
          WHERE id = $1
          RETURNING *`,
         [id, body.name ?? null, body.email ?? null],
       );
-      return rows[0] ?? null;
+      const after = rows[0];
+      await recordConfigChangeWithClient(client, principal.tenantId, { apiKeyId: principal.apiKeyId }, {
+        objectType: "Customer",
+        objectId: id,
+        customerId: id,
+        before: { name: before.name, email: before.email },
+        after: { name: after.name, email: after.email },
+      });
+      return after;
     });
 
     if (!row) {

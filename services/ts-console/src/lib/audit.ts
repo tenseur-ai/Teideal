@@ -40,3 +40,50 @@ export async function writeAuditEventWithClient(
     JSON.stringify(detail),
   ]);
 }
+
+export type ConfigChangeActor = { userId: string } | { apiKeyId: string };
+
+export interface ConfigChange {
+  objectType: string;
+  objectId: string;
+  customerId?: string | null;
+  before: unknown;
+  after: unknown;
+}
+
+export async function recordConfigChange(
+  pool: Pool,
+  tenantId: string,
+  actor: ConfigChangeActor,
+  change: ConfigChange,
+): Promise<void> {
+  await withTenant(pool, tenantId, (client) => recordConfigChangeWithClient(client, tenantId, actor, change));
+}
+
+// Configuration mutations already running inside withTenant must use this
+// variant so the mutation and its audit row commit atomically on one client.
+export async function recordConfigChangeWithClient(
+  client: PoolClient,
+  tenantId: string,
+  actor: ConfigChangeActor,
+  change: ConfigChange,
+): Promise<void> {
+  const actorUserId = "userId" in actor ? actor.userId : null;
+  const actorApiKeyId = "apiKeyId" in actor ? actor.apiKeyId : null;
+  await client.query(
+    `INSERT INTO audit_log (
+       tenant_id, occurred_at, actor_user_id, actor_api_key_id, event_type,
+       object_type, object_id, customer_id, before, after
+     ) VALUES ($1, clock_timestamp(), $2, $3, 'config_change', $4, $5, $6, $7, $8)`,
+    [
+      tenantId,
+      actorUserId,
+      actorApiKeyId,
+      change.objectType,
+      change.objectId,
+      change.customerId ?? null,
+      JSON.stringify(change.before),
+      JSON.stringify(change.after),
+    ],
+  );
+}
