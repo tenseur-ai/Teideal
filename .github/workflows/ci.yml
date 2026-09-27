@@ -141,6 +141,14 @@ jobs:
         working-directory: tests/plans
         run: npx vitest run
 
+      - name: Install grants suite dependencies
+        working-directory: tests/grants
+        run: npm ci
+
+      - name: Run TEID-17 acceptance suite (credit grants, expiry, recurring issuance, eligibility, voiding)
+        working-directory: tests/grants
+        run: npx vitest run
+
       - name: Run TEID-44 acceptance suite (formats, SLAs, schedules, docs, retries, concurrency, ownership)
         working-directory: tests/data-export
         run: npx vitest run
