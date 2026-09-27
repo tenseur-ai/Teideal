@@ -12,6 +12,7 @@ import { verifyCode, generateSecret, otpauthUri } from "../lib/totp.js";
 import { writeAuditEvent } from "../lib/audit.js";
 import { sendEmail } from "../lib/notify.js";
 import { requireSession } from "../lib/sessionAuth.js";
+import { consoleRoute } from "../lib/roleGuard.js";
 
 const LOCKOUT_THRESHOLD = 10;
 const LOCKOUT_MINUTES = 15;
@@ -49,6 +50,17 @@ async function recordFailedPassword(pool: Pool, tenantId: string, userId: string
 }
 
 export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
+  app.get("/auth/sso-status", async (req, reply) => {
+    const { tenant_key: tenantKey } = req.query as { tenant_key?: unknown };
+    if (typeof tenantKey !== "string" || !tenantKey) {
+      return reply.code(400).send({ error: "tenant_key is required" });
+    }
+    const tenantId = await resolveTenantByKey(pool, tenantKey);
+    if (!tenantId) return reply.code(404).send({ error: "account not found" });
+    const settings = await withTenant(pool, tenantId, (client) => getTenantSettings(client, tenantId));
+    return reply.send({ tenant_key: tenantKey, sso_enabled: settings.ssoEnabled });
+  });
+
   app.post("/auth/login", async (req, reply) => {
     const body = req.body as { tenant_key?: string; email?: string; password?: string };
     if (!body.tenant_key || !body.email || !body.password) {
@@ -94,6 +106,11 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
 
     const tenantId = await resolveTenantByKey(pool, body.tenant_key);
     if (!tenantId) return reply.code(401).send({ error: "invalid credentials" });
+
+    const settings = await withTenant(pool, tenantId, (client) => getTenantSettings(client, tenantId));
+    if (!settings.ssoEnabled) {
+      return reply.code(403).send({ error: "single sign-on is disabled for this account" });
+    }
 
     let identity;
     try {
@@ -178,7 +195,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireSession(pool));
 
-    scoped.post("/auth/mfa/reset", async (req, reply) => {
+    consoleRoute(scoped, "post", "/auth/mfa/reset", { selfService: true }, async (req, reply) => {
       const { tenantId, userId } = req.consolePrincipal!;
       const body = req.body as { totp_code?: string };
       const result = await withTenant(pool, tenantId, async (client) => {
@@ -194,7 +211,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send({ otpauth_uri: result.uri });
     });
 
-    scoped.post("/auth/mfa/reset/confirm", async (req, reply) => {
+    consoleRoute(scoped, "post", "/auth/mfa/reset/confirm", { selfService: true }, async (req, reply) => {
       const { tenantId, userId } = req.consolePrincipal!;
       const body = req.body as { totp_code?: string };
       const ok = await withTenant(pool, tenantId, async (client) => {
@@ -213,7 +230,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
     // TEID-91-T9: mandatory-role accounts can never disable MFA, and every
     // other account needs a fresh MFA code (step-up) to do so -- a session
     // established with only a password is not enough on its own.
-    scoped.post("/auth/mfa/disable", async (req, reply) => {
+    consoleRoute(scoped, "post", "/auth/mfa/disable", { selfService: true }, async (req, reply) => {
       const { tenantId, userId, role } = req.consolePrincipal!;
       if (MANDATORY_MFA_ROLES.has(role)) {
         return reply.code(403).send({ error: "MFA is mandatory for this role and cannot be disabled" });
@@ -231,7 +248,7 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send({});
     });
 
-    scoped.post("/auth/logout", async (req, reply) => {
+    consoleRoute(scoped, "post", "/auth/logout", { selfService: true }, async (req, reply) => {
       await deleteSession(pool, req.consolePrincipal!.sessionId);
       return reply.send({});
     });

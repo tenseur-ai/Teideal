@@ -8,6 +8,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerTenantSettingsRoutes } from "./routes/tenantSettings.js";
 import { registerAuditLogRoutes } from "./routes/auditLog.js";
 import { registerApiKeyRoutes } from "./routes/apiKeys.js";
+import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -26,6 +27,7 @@ export function buildServer() {
   registerTenantSettingsRoutes(app, pool);
   registerAuditLogRoutes(app, pool);
   registerApiKeyRoutes(app, pool);
+  registerUserRoutes(app, pool);
 
   registerCustomerRoutes(app, pool);
 

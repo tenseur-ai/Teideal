@@ -3,6 +3,8 @@ import type { TenantSettings } from "./tenants.js";
 
 export type Role = "Owner" | "Billing Admin" | "Finance" | "Support" | "Developer";
 
+export const ROLES: readonly Role[] = ["Owner", "Billing Admin", "Finance", "Support", "Developer"];
+
 // TEID-91-AC2: mandatory for Owner and Billing Admin, optional for others.
 export const MANDATORY_MFA_ROLES: ReadonlySet<Role> = new Set(["Owner", "Billing Admin"]);
 
