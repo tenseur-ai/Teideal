@@ -3,6 +3,9 @@ node_modules/
 dist/
 *.log
 
+# Personal Claude Code settings (machine-specific permission grants, not shared)
+.claude/settings.local.json
+
 # Go
 /services/go-usage/go-usage
 
