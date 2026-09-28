@@ -12,6 +12,10 @@ import { call } from "./http.js";
 let fx: Fixtures;
 let tenant1UsageEventId: string;
 let tenant2UsageEventId: string;
+let tenant1ReservationId: string;
+let tenant2ReservationId: string;
+let tenant1LedgerTransactionId: string;
+let tenant2LedgerTransactionId: string;
 
 beforeAll(async () => {
   fx = loadFixtures();
@@ -36,6 +40,47 @@ beforeAll(async () => {
   });
   expect(r2.status).toBe(201);
   tenant2UsageEventId = r2.body.id;
+
+  const reservation1 = await call(`${GO_USAGE_URL}/reservations`, {
+    method: "POST",
+    apiKey: fx.tenant1.apiKey,
+    body: { customer_id: fx.tenant1.customerId, usage_event_id: tenant1UsageEventId },
+  });
+  expect(reservation1.status).toBe(201);
+  tenant1ReservationId = reservation1.body.id;
+
+  const reservation2 = await call(`${GO_USAGE_URL}/reservations`, {
+    method: "POST",
+    apiKey: fx.tenant2.apiKey,
+    body: { customer_id: fx.tenant2.customerId, usage_event_id: tenant2UsageEventId },
+  });
+  expect(reservation2.status).toBe(201);
+  tenant2ReservationId = reservation2.body.id;
+
+  const ledgerBody = (customerId: string, usageEventId: string, reservationId: string) => ({
+    customer_id: customerId,
+    usage_event_id: usageEventId,
+    reservation_id: reservationId,
+    lines: [
+      { account_code: "receivable", direction: "debit", amount: "1.00" },
+      { account_code: "revenue", direction: "credit", amount: "1.00" },
+    ],
+  });
+  const ledger1 = await call(`${GO_USAGE_URL}/ledger/transactions`, {
+    method: "POST",
+    apiKey: fx.tenant1.apiKey,
+    body: ledgerBody(fx.tenant1.customerId, tenant1UsageEventId, tenant1ReservationId),
+  });
+  expect(ledger1.status).toBe(201);
+  tenant1LedgerTransactionId = ledger1.body.id;
+
+  const ledger2 = await call(`${GO_USAGE_URL}/ledger/transactions`, {
+    method: "POST",
+    apiKey: fx.tenant2.apiKey,
+    body: ledgerBody(fx.tenant2.customerId, tenant2UsageEventId, tenant2ReservationId),
+  });
+  expect(ledger2.status).toBe(201);
+  tenant2LedgerTransactionId = ledger2.body.id;
 });
 
 describe("TEID-41-T2: cross-tenant regression across every API", () => {
@@ -124,6 +169,62 @@ describe("TEID-41-T2: cross-tenant regression across every API", () => {
     const serialized = JSON.stringify(attackerQueue.body);
     expect(serialized).toContain(attackerKey);
     expect(serialized).not.toContain(victimKey);
+  });
+
+  it("POST /reservations cannot attach a reservation to another tenant's customer or usage event", async () => {
+    const response = await call(`${GO_USAGE_URL}/reservations`, {
+      method: "POST",
+      apiKey: fx.tenant1.apiKey,
+      body: { customer_id: fx.tenant2.customerId, usage_event_id: tenant2UsageEventId },
+    });
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(response.body)).not.toContain(tenant2UsageEventId);
+  });
+
+  it("POST /ledger/transactions cannot use another tenant's customer or reservation", async () => {
+    const response = await call(`${GO_USAGE_URL}/ledger/transactions`, {
+      method: "POST",
+      apiKey: fx.tenant1.apiKey,
+      body: {
+        customer_id: fx.tenant2.customerId,
+        reservation_id: tenant2ReservationId,
+        lines: [
+          { account_code: "receivable", direction: "debit", amount: "1.00" },
+          { account_code: "revenue", direction: "credit", amount: "1.00" },
+        ],
+      },
+    });
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(response.body)).not.toContain(tenant2ReservationId);
+  });
+
+  it("GET /ledger/transactions/:id cannot read another tenant's transaction", async () => {
+    const response = await call(`${GO_USAGE_URL}/ledger/transactions/${tenant2LedgerTransactionId}`, {
+      apiKey: fx.tenant1.apiKey,
+    });
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(response.body)).not.toContain(tenant2LedgerTransactionId);
+
+    const own = await call(`${GO_USAGE_URL}/ledger/transactions/${tenant1LedgerTransactionId}`, {
+      apiKey: fx.tenant1.apiKey,
+    });
+    expect(own.status).toBe(200);
+  });
+
+  it("POST /ledger/transactions/:id/reverse cannot reverse another tenant's transaction", async () => {
+    const response = await call(`${GO_USAGE_URL}/ledger/transactions/${tenant2LedgerTransactionId}/reverse`, {
+      method: "POST",
+      apiKey: fx.tenant1.apiKey,
+      body: { reason: "cross-tenant attack" },
+    });
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(response.body)).not.toContain(tenant2LedgerTransactionId);
+
+    const victimRead = await call(`${GO_USAGE_URL}/ledger/transactions/${tenant2LedgerTransactionId}`, {
+      apiKey: fx.tenant2.apiKey,
+    });
+    expect(victimRead.status).toBe(200);
+    expect(victimRead.body.reverses_transaction_id).toBeNull();
   });
 });
 

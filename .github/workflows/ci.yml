@@ -11,6 +11,7 @@ env:
   GO_USAGE_URL: http://127.0.0.1:8082
   FAKE_GOOGLE_URL: http://127.0.0.1:8090
   FAKE_S3_URL: http://127.0.0.1:8091
+  ONCALL_ALERT_WEBHOOK_URL: http://127.0.0.1:8092/alerts
   AWS_ENDPOINT_URL_OVERRIDE: http://127.0.0.1:8091
   CI: "true"
   PGPASSWORD: postgres
@@ -60,7 +61,7 @@ jobs:
         working-directory: services/go-usage
         run: |
           go build -o /tmp/go-usage ./cmd/server
-          PORT=8082 DATABASE_URL="$DATABASE_URL" /tmp/go-usage &
+          PORT=8082 DATABASE_URL="$DATABASE_URL" DISABLE_BACKGROUND_WORKERS=true /tmp/go-usage &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8082/healthz && break; sleep 1; done
 
       - name: Reject floating-point types in money code (TEID-94-T2/T6)
@@ -191,6 +192,17 @@ jobs:
 
       - name: Run TEID-31 acceptance suite (duplicate acknowledgement, retention expiry, conflict review, database-enforced concurrency)
         working-directory: tests/idempotency
+        run: npx vitest run
+
+      - name: Install ledger suite dependencies and start the fake on-call webhook
+        working-directory: tests/ledger
+        run: |
+          npm ci
+          npm run fake-oncall &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8092/healthz && break; sleep 1; done
+
+      - name: Run TEID-32 acceptance suite (append-only ledger, reversals, integrity worker, load, adversarial enforcement)
+        working-directory: tests/ledger
         run: npx vitest run
 
       - name: Install currency rounding suite dependencies

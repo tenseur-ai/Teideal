@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -13,6 +14,7 @@ import (
 	"teideal/go-usage/internal/api"
 	"teideal/go-usage/internal/auth"
 	"teideal/go-usage/internal/db"
+	"teideal/go-usage/internal/ledger"
 )
 
 func getenv(key, fallback string) string {
@@ -54,6 +56,36 @@ func main() {
 	mux.Handle("GET /customers/{id}/billing-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetBillingConfig)))
 	mux.Handle("PUT /customers/{id}/billing-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PutBillingConfig)))
 	mux.Handle("POST /period/resolve", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostResolvePeriod)))
+	mux.Handle("POST /reservations", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostReservation)))
+	mux.Handle("POST /ledger/transactions", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostLedgerTransaction)))
+	mux.Handle("POST /ledger/transactions/{id}/reverse", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.ReverseLedgerTransaction)))
+	mux.Handle("GET /ledger/transactions/{id}", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetLedgerTransaction)))
+
+	if os.Getenv("DISABLE_BACKGROUND_WORKERS") != "true" {
+		interval := 24 * time.Hour
+		if raw := os.Getenv("LEDGER_INTEGRITY_CHECK_INTERVAL_MS"); raw != "" {
+			milliseconds, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || milliseconds <= 0 {
+				log.Printf("go-usage: invalid LEDGER_INTEGRITY_CHECK_INTERVAL_MS %q; using 24h", raw)
+			} else {
+				interval = time.Duration(milliseconds) * time.Millisecond
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case checkedAt := <-ticker.C:
+					if err := ledger.CheckAllTransactionsBalanced(ctx, pool, checkedAt); err != nil {
+						log.Printf("go-usage: ledger integrity check failed: %v", err)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	server := &http.Server{
 		Addr:              addr,
