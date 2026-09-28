@@ -1,8 +1,10 @@
 import type { PoolClient } from "pg";
+import { computeNextTranche, type DrawdownSchedule } from "./commitSchedule.js";
 
 export type GrantSource = "paid" | "promotional" | "commit" | "goodwill";
 export type GrantStatus = "active" | "expired" | "void";
-export type GrantEntryType = "issued" | "expired" | "voided";
+export type GrantEntryType = "issued" | "expired" | "voided" | "released" | "carried_over";
+export type { DrawdownSchedule };
 
 export interface GrantRecord {
   id: string;
@@ -18,6 +20,10 @@ export interface GrantRecord {
   created_by: string | null;
   recurring_template_id: string | null;
   period_key: string | null;
+  drawdown_schedule: DrawdownSchedule | null;
+  overage_rate: number | null;
+  carries_over: boolean;
+  next_release_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -51,6 +57,22 @@ export interface CreateGrantInput {
   source: GrantSource;
   start_date: Date;
   expiry_date: Date | null;
+  drawdown_schedule: DrawdownSchedule | null;
+  overage_rate: number | null;
+  carries_over: boolean;
+}
+
+export interface AmendCommitInput {
+  reason: string;
+  overage_rate?: number;
+  expiry_date?: Date;
+  carries_over?: boolean;
+}
+
+export interface AmendCommitChanges {
+  overage_rate?: number;
+  expiry_date?: Date;
+  carries_over?: boolean;
 }
 
 export interface CreateTemplateInput {
@@ -71,6 +93,8 @@ export interface LedgerFilters {
   customerId?: string;
   from?: string;
   to?: string;
+  entryType?: GrantEntryType;
+  source?: GrantSource;
 }
 
 export interface Eligibility {
@@ -87,10 +111,14 @@ const SOURCES: readonly GrantSource[] = ["paid", "promotional", "commit", "goodw
 // server's local zone. Same rule the eligibility/consume as_of parameter uses.
 const EXPLICIT_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
+const ENTRY_TYPES: readonly GrantEntryType[] = ["issued", "expired", "voided", "released", "carried_over"];
+const DRAWDOWN_SCHEDULES: readonly DrawdownSchedule[] = ["upfront", "monthly", "quarterly"];
+
 const GRANT_SELECT = `
   g.id, g.customer_id, g.amount, g.remaining_amount, g.unit, g.source,
   g.start_date, g.expiry_date, g.status, g.created_by_user_id,
   creator.email AS created_by, g.recurring_template_id, g.period_key,
+  g.drawdown_schedule, g.overage_rate, g.carries_over, g.next_release_at,
   g.created_at, g.updated_at`;
 
 const TEMPLATE_SELECT = `
@@ -111,6 +139,10 @@ interface GrantQueryRow {
   created_by: string | null;
   recurring_template_id: string | null;
   period_key: string | null;
+  drawdown_schedule: DrawdownSchedule | null;
+  overage_rate: string | number | null;
+  carries_over: boolean;
+  next_release_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -197,6 +229,20 @@ function validateSource(value: unknown): GrantValidationError | { value: GrantSo
   return { value: value as GrantSource };
 }
 
+function validateOverageRate(value: unknown): GrantValidationError | { value: number } {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return { error: "overage_rate must be a finite number greater than or equal to 0" };
+  }
+  return { value };
+}
+
+function validateDrawdownSchedule(value: unknown): GrantValidationError | { value: DrawdownSchedule } {
+  if (typeof value !== "string" || !DRAWDOWN_SCHEDULES.includes(value as DrawdownSchedule)) {
+    return { error: "drawdown_schedule must be upfront, monthly, or quarterly" };
+  }
+  return { value: value as DrawdownSchedule };
+}
+
 export function validateGrantInput(body: unknown): GrantValidationError | CreateGrantInput {
   const record = asRecord(body);
   const customerId = validateCustomerId(record.customer_id);
@@ -207,6 +253,11 @@ export function validateGrantInput(body: unknown): GrantValidationError | Create
   if ("error" in unit) return unit;
   const source = validateSource(record.source);
   if ("error" in source) return source;
+  for (const field of ["drawdown_schedule", "overage_rate", "carries_over"] as const) {
+    if (source.value !== "commit" && record[field] !== undefined) {
+      return { error: `${field} is only valid for a commit` };
+    }
+  }
   if (record.start_date === undefined || record.start_date === null) return { error: "start_date is required" };
   const start = parseExplicitTimestamp(record.start_date, "start_date");
   if ("error" in start) return start;
@@ -219,6 +270,31 @@ export function validateGrantInput(body: unknown): GrantValidationError | Create
     expiry = parsed.value;
   }
 
+  let drawdownSchedule: DrawdownSchedule | null = null;
+  let overageRate: number | null = null;
+  let carriesOver = false;
+  if (source.value === "commit") {
+    if (record.drawdown_schedule === undefined || record.drawdown_schedule === null) {
+      return { error: "drawdown_schedule is required for a commit" };
+    }
+    const schedule = validateDrawdownSchedule(record.drawdown_schedule);
+    if ("error" in schedule) return schedule;
+    if (record.overage_rate === undefined || record.overage_rate === null) {
+      return { error: "overage_rate is required for a commit" };
+    }
+    const rate = validateOverageRate(record.overage_rate);
+    if ("error" in rate) return rate;
+    if (record.carries_over !== undefined && record.carries_over !== null) {
+      if (typeof record.carries_over !== "boolean") return { error: "carries_over must be a boolean" };
+      carriesOver = record.carries_over;
+    }
+    if (schedule.value !== "upfront" && expiry === null) {
+      return { error: "expiry_date is required for a monthly or quarterly commit" };
+    }
+    drawdownSchedule = schedule.value;
+    overageRate = rate.value;
+  }
+
   return {
     customer_id: customerId.value,
     amount: amount.value,
@@ -226,6 +302,9 @@ export function validateGrantInput(body: unknown): GrantValidationError | Create
     source: source.value,
     start_date: start.value,
     expiry_date: expiry,
+    drawdown_schedule: drawdownSchedule,
+    overage_rate: overageRate,
+    carries_over: carriesOver,
   };
 }
 
@@ -259,10 +338,40 @@ export function validateConsumeInput(body: unknown): GrantValidationError | Cons
   return { amount: amount.value, as_of: asOf.value };
 }
 
+export function validateReason(value: unknown): GrantValidationError | { reason: string } {
+  if (typeof value !== "string" || value.trim() === "") return { error: "reason is required" };
+  return { reason: value };
+}
+
 export function validateVoidInput(body: unknown): GrantValidationError | { reason: string } {
+  return validateReason(asRecord(body).reason);
+}
+
+export function validateAmendCommitInput(body: unknown): GrantValidationError | AmendCommitInput {
   const record = asRecord(body);
-  if (typeof record.reason !== "string" || record.reason.trim() === "") return { error: "reason is required" };
-  return { reason: record.reason };
+  const reason = validateReason(record.reason);
+  if ("error" in reason) return reason;
+  const changes: AmendCommitInput = { reason: reason.reason };
+  let any = false;
+  if (record.overage_rate !== undefined) {
+    const rate = validateOverageRate(record.overage_rate);
+    if ("error" in rate) return rate;
+    changes.overage_rate = rate.value;
+    any = true;
+  }
+  if (record.expiry_date !== undefined) {
+    const parsed = parseExplicitTimestamp(record.expiry_date, "expiry_date");
+    if ("error" in parsed) return parsed;
+    changes.expiry_date = parsed.value;
+    any = true;
+  }
+  if (record.carries_over !== undefined) {
+    if (typeof record.carries_over !== "boolean") return { error: "carries_over must be a boolean" };
+    changes.carries_over = record.carries_over;
+    any = true;
+  }
+  if (!any) return { error: "at least one field must change" };
+  return changes;
 }
 
 export function validateLedgerFilters(query: {
@@ -270,12 +379,20 @@ export function validateLedgerFilters(query: {
   customer_id?: unknown;
   from?: unknown;
   to?: unknown;
+  entry_type?: unknown;
+  source?: unknown;
 }): GrantValidationError | LedgerFilters {
-  for (const key of ["grant_id", "customer_id", "from", "to"] as const) {
+  for (const key of ["grant_id", "customer_id", "from", "to", "entry_type", "source"] as const) {
     if (query[key] !== undefined && typeof query[key] !== "string") return { error: `${key} must be a string` };
   }
   if (typeof query.grant_id === "string" && !UUID_RE.test(query.grant_id)) return { error: "grant_id must be a UUID" };
   if (typeof query.customer_id === "string" && !UUID_RE.test(query.customer_id)) return { error: "customer_id must be a UUID" };
+  if (typeof query.entry_type === "string" && !ENTRY_TYPES.includes(query.entry_type as GrantEntryType)) {
+    return { error: "entry_type must be issued, expired, voided, released, or carried_over" };
+  }
+  if (typeof query.source === "string" && !SOURCES.includes(query.source as GrantSource)) {
+    return { error: "source must be paid, promotional, commit, or goodwill" };
+  }
 
   const parseDate = (name: "from" | "to", value: unknown): string | undefined => {
     if (value === undefined) return undefined;
@@ -294,6 +411,8 @@ export function validateLedgerFilters(query: {
     customerId: typeof query.customer_id === "string" ? query.customer_id : undefined,
     from,
     to,
+    entryType: typeof query.entry_type === "string" ? query.entry_type as GrantEntryType : undefined,
+    source: typeof query.source === "string" ? query.source as GrantSource : undefined,
   };
 }
 
@@ -312,6 +431,10 @@ export function shapeGrantRecord(row: GrantQueryRow): GrantRecord {
     created_by: row.created_by,
     recurring_template_id: row.recurring_template_id,
     period_key: row.period_key,
+    drawdown_schedule: row.drawdown_schedule,
+    overage_rate: row.overage_rate === null ? null : toNumber(row.overage_rate),
+    carries_over: row.carries_over,
+    next_release_at: row.next_release_at === null ? null : toIso(row.next_release_at),
     created_at: toIso(row.created_at),
     updated_at: toIso(row.updated_at),
   };
@@ -392,32 +515,60 @@ export async function insertGrant(
   tenantId: string,
   createdByUserId: string,
   input: CreateGrantInput,
-): Promise<string> {
+): Promise<{ id: string; issuedAmount: string }> {
+  const fullAmount = String(input.amount);
+  let remainingAmount = fullAmount;
+  let issuedAmount = fullAmount;
+  let nextReleaseAt: Date | null = null;
+  if (
+    input.source === "commit"
+    && input.drawdown_schedule !== null
+    && input.drawdown_schedule !== "upfront"
+  ) {
+    const first = computeNextTranche({
+      amount: fullAmount,
+      startDate: input.start_date,
+      expiryDate: input.expiry_date,
+      drawdownSchedule: input.drawdown_schedule,
+      trancheIndex: 0,
+    });
+    remainingAmount = first.trancheAmount;
+    issuedAmount = first.trancheAmount;
+    nextReleaseAt = first.nextReleaseAt;
+  }
   const { rows } = await client.query<{ id: string }>(
     `INSERT INTO grants (
        tenant_id, customer_id, amount, remaining_amount, unit, source,
-       start_date, expiry_date, status, created_by_user_id
-     ) VALUES ($1, $2, $3::numeric, $3::numeric, $4, $5, $6, $7, 'active', $8)
+       start_date, expiry_date, status, created_by_user_id,
+       drawdown_schedule, overage_rate, carries_over, next_release_at
+     ) VALUES (
+       $1, $2, $3::numeric, $4::numeric, $5, $6, $7, $8, 'active', $9, $10, $11::numeric, $12, $13
+     )
      RETURNING id`,
     [
       tenantId,
       input.customer_id,
-      String(input.amount),
+      fullAmount,
+      remainingAmount,
       input.unit,
       input.source,
       input.start_date,
       input.expiry_date,
       createdByUserId,
+      input.drawdown_schedule,
+      input.overage_rate === null ? null : String(input.overage_rate),
+      input.carries_over,
+      nextReleaseAt,
     ],
   );
-  return rows[0].id;
+  return { id: rows[0].id, issuedAmount };
 }
 
 export async function insertIssuedLedger(
   client: PoolClient,
   tenantId: string,
   grantId: string,
-  amount: number,
+  amount: number | string,
 ): Promise<void> {
   await client.query(
     `INSERT INTO grant_ledger_entries (tenant_id, grant_id, entry_type, amount)
@@ -478,6 +629,41 @@ export async function consumeGrant(
   const grant = await readGrant(client, tenantId, grantId);
   if (!grant) throw new Error("consumed grant was not readable");
   return grant;
+}
+
+export async function amendCommit(
+  client: PoolClient,
+  tenantId: string,
+  grantId: string,
+  changes: AmendCommitChanges,
+): Promise<{ before: GrantRecord; after: GrantRecord } | null> {
+  const before = await readGrant(client, tenantId, grantId);
+  if (!before || before.status !== "active" || before.source !== "commit") return null;
+  const sets: string[] = [];
+  const values: unknown[] = [grantId, tenantId];
+  if (changes.overage_rate !== undefined) {
+    values.push(String(changes.overage_rate));
+    sets.push(`overage_rate = $${values.length}::numeric`);
+  }
+  if (changes.expiry_date !== undefined) {
+    values.push(changes.expiry_date);
+    sets.push(`expiry_date = $${values.length}`);
+  }
+  if (changes.carries_over !== undefined) {
+    values.push(changes.carries_over);
+    sets.push(`carries_over = $${values.length}`);
+  }
+  if (sets.length === 0) return null;
+  const updated = await client.query(
+    `UPDATE grants SET ${sets.join(", ")}
+     WHERE id = $1 AND tenant_id = $2 AND status = 'active'
+     RETURNING id`,
+    values,
+  );
+  if ((updated.rowCount ?? 0) === 0) return null;
+  const after = await readGrant(client, tenantId, grantId);
+  if (!after) throw new Error("amended commit was not readable");
+  return { before, after };
 }
 
 export async function voidGrant(
@@ -552,6 +738,8 @@ export async function listLedgerEntries(
   if (filters.customerId) add("g.customer_id = ?", filters.customerId);
   if (filters.from) add("e.occurred_at >= ?", filters.from);
   if (filters.to) add("e.occurred_at <= ?", filters.to);
+  if (filters.entryType) add("e.entry_type = ?", filters.entryType);
+  if (filters.source) add("g.source = ?", filters.source);
   if (cursor) add("e.id > ?", cursor);
   values.push(limit);
   const rows = (await client.query<LedgerQueryRow>(

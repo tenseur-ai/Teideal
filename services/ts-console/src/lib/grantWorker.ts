@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { computeNextTranche, trancheCount, type DrawdownSchedule } from "./commitSchedule.js";
 import { withTenant } from "./db.js";
 
 // "monthly" is the only cadence this story issues. The key is the UTC year
@@ -56,6 +57,18 @@ interface ExpiredGrant {
   id: string;
   tenant_id: string;
   remaining_amount: string;
+  source: string;
+  carries_over: boolean;
+}
+
+interface DueCommit {
+  id: string;
+  tenant_id: string;
+  amount: string;
+  start_date: Date;
+  expiry_date: Date | null;
+  drawdown_schedule: DrawdownSchedule;
+  released_count: number;
 }
 
 // Claim and settle in the same transaction. SKIP LOCKED lets a second
@@ -63,17 +76,20 @@ interface ExpiredGrant {
 // and then expiring them again.
 async function expireForTenant(client: PoolClient, now: Date): Promise<number> {
   const claimed = await client.query<ExpiredGrant>(
-    `SELECT id, tenant_id, remaining_amount::text AS remaining_amount
+    `SELECT id, tenant_id, remaining_amount::text AS remaining_amount, source, carries_over
      FROM grants
      WHERE status = 'active' AND expiry_date IS NOT NULL AND expiry_date <= $1
      FOR UPDATE SKIP LOCKED`,
     [now],
   );
   for (const row of claimed.rows) {
+    // A carrying commit is still closed. The ledger name is the only
+    // difference: the unused balance is reported, not re-issued.
+    const entryType = row.source === "commit" && row.carries_over ? "carried_over" : "expired";
     await client.query(
       `INSERT INTO grant_ledger_entries (tenant_id, grant_id, entry_type, amount)
-       VALUES ($1, $2, 'expired', -$3::numeric)`,
-      [row.tenant_id, row.id, row.remaining_amount],
+       VALUES ($1, $2, $3, -$4::numeric)`,
+      [row.tenant_id, row.id, entryType, row.remaining_amount],
     );
     await client.query(`UPDATE grants SET status = 'expired' WHERE id = $1`, [row.id]);
   }
@@ -86,4 +102,65 @@ export async function processExpiredGrants(pool: Pool, now = new Date()): Promis
     expired += await withTenant(pool, tenantId, (client) => expireForTenant(client, now));
   }
   return expired;
+}
+
+// One due tranche per claimed commit. A later anniversary that is already
+// in the past stays due and is released on the next call, the same way a
+// single expiry pass settles one row at a time.
+async function releaseDueTranchesForTenant(client: PoolClient, now: Date): Promise<number> {
+  const claimed = await client.query<DueCommit>(
+    `SELECT g.id, g.tenant_id, g.amount::text AS amount, g.start_date, g.expiry_date,
+            g.drawdown_schedule,
+            (SELECT count(*)::int FROM grant_ledger_entries e
+             WHERE e.grant_id = g.id AND e.entry_type IN ('issued', 'released')) AS released_count
+     FROM grants g
+     WHERE g.status = 'active' AND g.source = 'commit'
+       AND g.next_release_at IS NOT NULL AND g.next_release_at <= $1
+     FOR UPDATE OF g SKIP LOCKED`,
+    [now],
+  );
+  for (const row of claimed.rows) {
+    if (row.drawdown_schedule !== "monthly" && row.drawdown_schedule !== "quarterly") {
+      await client.query(`UPDATE grants SET next_release_at = NULL WHERE id = $1`, [row.id]);
+      continue;
+    }
+    const startDate = row.start_date instanceof Date ? row.start_date : new Date(row.start_date);
+    const expiryDate = row.expiry_date === null
+      ? null
+      : row.expiry_date instanceof Date ? row.expiry_date : new Date(row.expiry_date);
+    const releasedCount = Number(row.released_count);
+    // An amended expiry can move the last anniversary before the tranche
+    // this row still has queued. Nothing further is owed; do not insert a
+    // zero-amount release.
+    if (expiryDate === null || releasedCount >= trancheCount(startDate, expiryDate, row.drawdown_schedule)) {
+      await client.query(`UPDATE grants SET next_release_at = NULL WHERE id = $1`, [row.id]);
+      continue;
+    }
+    const next = computeNextTranche({
+      amount: row.amount,
+      startDate,
+      expiryDate,
+      drawdownSchedule: row.drawdown_schedule,
+      trancheIndex: releasedCount,
+    });
+    await client.query(
+      `UPDATE grants SET remaining_amount = remaining_amount + $2::numeric, next_release_at = $3
+       WHERE id = $1`,
+      [row.id, next.trancheAmount, next.nextReleaseAt],
+    );
+    await client.query(
+      `INSERT INTO grant_ledger_entries (tenant_id, grant_id, entry_type, amount)
+       VALUES ($1, $2, 'released', $3::numeric)`,
+      [row.tenant_id, row.id, next.trancheAmount],
+    );
+  }
+  return claimed.rows.length;
+}
+
+export async function processCommitDrawdowns(pool: Pool, now = new Date()): Promise<number> {
+  let released = 0;
+  for (const tenantId of await tenantIds(pool)) {
+    released += await withTenant(pool, tenantId, (client) => releaseDueTranchesForTenant(client, now));
+  }
+  return released;
 }

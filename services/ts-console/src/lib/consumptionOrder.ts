@@ -27,6 +27,7 @@ export interface ConsumptionLine {
   grant_id: string | null;
   source_category: string;
   amount: number;
+  overage_amount_due?: number;
 }
 
 export interface ConsumptionRecord {
@@ -44,6 +45,7 @@ export interface DrawableGrant {
   expiry_date: Date | null;
   created_at: Date;
   remaining_amount: number;
+  overage_rate: number | null;
 }
 
 interface LockedGrantRow {
@@ -52,6 +54,7 @@ interface LockedGrantRow {
   source: ConsumptionSource;
   expiry_date: Date | string | null;
   created_at: Date | string;
+  overage_rate: string | null;
 }
 
 interface ConsumptionRow {
@@ -67,6 +70,7 @@ interface ConsumptionLineRow {
   grant_id: string | null;
   source_category: string;
   amount: string;
+  overage_amount_due: string | null;
 }
 
 function asRecord(body: unknown): Record<string, unknown> {
@@ -248,7 +252,8 @@ async function lockEligibleGrants(
   // ORDER BY id makes every concurrent consume lock this customer's rows in
   // the same order. created_at is selected because the draw sort needs it.
   const { rows } = await client.query<LockedGrantRow>(
-    `SELECT id, remaining_amount::text AS remaining_amount, source, expiry_date, created_at
+    `SELECT id, remaining_amount::text AS remaining_amount, source, expiry_date, created_at,
+            overage_rate::text AS overage_rate
      FROM grants
      WHERE customer_id = $1
        AND tenant_id = $2
@@ -266,6 +271,7 @@ async function lockEligibleGrants(
     expiry_date: asDate(row.expiry_date),
     created_at: asDate(row.created_at) as Date,
     remaining_amount: Number(row.remaining_amount),
+    overage_rate: row.overage_rate === null ? null : Number(row.overage_rate),
   }));
 }
 
@@ -290,6 +296,7 @@ export async function consumeAcrossGrants(
   )).rows[0];
 
   let needed = input.amount;
+  let lastCommitOverageRate: number | null = null;
   const lines: ConsumptionLine[] = [];
   for (const grant of sorted) {
     if (needed <= 0) break;
@@ -303,6 +310,7 @@ export async function consumeAcrossGrants(
     );
     if ((updated.rowCount ?? 0) !== 1) throw new Error(`grant ${grant.id} draw of ${take} did not apply`);
     needed -= take;
+    if (grant.source === "commit") lastCommitOverageRate = grant.overage_rate;
     lines.push({ grant_id: grant.id, source_category: grant.source, amount: take });
     await client.query(
       `INSERT INTO usage_consumption_lines (
@@ -312,12 +320,15 @@ export async function consumeAcrossGrants(
     );
   }
   if (needed > 0) {
-    lines.push({ grant_id: null, source_category: "overage", amount: needed });
+    const overage: ConsumptionLine = { grant_id: null, source_category: "overage", amount: needed };
+    const overageAmountDue = lastCommitOverageRate === null ? null : needed * lastCommitOverageRate;
+    if (overageAmountDue !== null) overage.overage_amount_due = overageAmountDue;
+    lines.push(overage);
     await client.query(
       `INSERT INTO usage_consumption_lines (
-         id, tenant_id, consumption_id, grant_id, source_category, amount
-       ) VALUES ($1, $2, $3, NULL, 'overage', $4::numeric)`,
-      [orderedUuid(), tenantId, parent.id, String(needed)],
+         id, tenant_id, consumption_id, grant_id, source_category, amount, overage_amount_due
+       ) VALUES ($1, $2, $3, NULL, 'overage', $4::numeric, $5::numeric)`,
+      [orderedUuid(), tenantId, parent.id, String(needed), overageAmountDue === null ? null : String(overageAmountDue)],
     );
   }
 
@@ -357,7 +368,8 @@ export async function listConsumptionTimeline(
 
   const ids = parents.map((row) => row.id);
   const lineRows = (await client.query<ConsumptionLineRow>(
-    `SELECT consumption_id, grant_id, source_category, amount::text AS amount
+    `SELECT consumption_id, grant_id, source_category, amount::text AS amount,
+            overage_amount_due::text AS overage_amount_due
      FROM usage_consumption_lines
      WHERE tenant_id = $1 AND consumption_id = ANY($2::uuid[])
      ORDER BY id`,
@@ -366,11 +378,13 @@ export async function listConsumptionTimeline(
   const grouped = new Map<string, ConsumptionLine[]>();
   for (const id of ids) grouped.set(id, []);
   for (const line of lineRows) {
-    grouped.get(line.consumption_id)?.push({
+    const shaped: ConsumptionLine = {
       grant_id: line.grant_id,
       source_category: line.source_category,
       amount: Number(line.amount),
-    });
+    };
+    if (line.overage_amount_due !== null) shaped.overage_amount_due = Number(line.overage_amount_due);
+    grouped.get(line.consumption_id)?.push(shaped);
   }
   return parents.map((row) => ({
     id: row.id,

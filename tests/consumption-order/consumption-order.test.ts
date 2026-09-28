@@ -33,10 +33,15 @@ async function createCustomer(label: string): Promise<string> {
 }
 
 async function issueGrant(customerId: string, body: Record<string, unknown>) {
+  // TEID-19 requires a schedule and overage rate on source=commit. These
+  // fixtures are consumption-order categories: upfront releases the full
+  // amount immediately, and a zero rate keeps a straddling overage line at
+  // zero dollars. See NOTES-TEID-19.md.
+  const commitDefaults = body.source === "commit" ? { drawdown_schedule: "upfront", overage_rate: 0 } : {};
   const response = await call(`${TS_CONSOLE_URL}/grants`, {
     method: "POST",
     token: opsToken,
-    body: { customer_id: customerId, unit: "credits", start_date: STARTED, ...body },
+    body: { customer_id: customerId, unit: "credits", start_date: STARTED, ...commitDefaults, ...body },
   });
   expect(response.status).toBe(201);
   return response.body as { id: string };

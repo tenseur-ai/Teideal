@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { recordConfigChangeWithClient } from "../lib/audit.js";
 import { withTenant } from "../lib/db.js";
 import {
+  amendCommit,
   consumeGrant,
   customerVisible,
   insertGrant,
@@ -14,6 +15,7 @@ import {
   readEligibility,
   readGrant,
   readGrantTemplate,
+  validateAmendCommitInput,
   validateConsumeInput,
   validateGrantInput,
   validateLedgerFilters,
@@ -29,6 +31,7 @@ import { ROLES } from "../lib/users.js";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INSUFFICIENT_BALANCE = "insufficient balance";
 const VOID_CONFLICT = "grant is not active (already void or expired, or does not exist for this tenant)";
+const AMEND_CONFLICT = "grant is not an active commit (already void or expired, or not a commit)";
 const CUSTOMER_NOT_VISIBLE = "customer not found for this tenant";
 
 function pageQuery(
@@ -68,13 +71,13 @@ export function registerGrantRoutes(app: FastifyInstance, pool: Pool) {
       const { tenantId, userId } = req.consolePrincipal!;
       const created = await withTenant(pool, tenantId, async (client) => {
         if (!(await customerVisible(client, parsed.customer_id))) return null;
-        const id = await insertGrant(client, tenantId, userId, parsed);
-        await insertIssuedLedger(client, tenantId, id, parsed.amount);
-        const grant = await readGrant(client, tenantId, id);
+        const inserted = await insertGrant(client, tenantId, userId, parsed);
+        await insertIssuedLedger(client, tenantId, inserted.id, inserted.issuedAmount);
+        const grant = await readGrant(client, tenantId, inserted.id);
         if (!grant) throw new Error("inserted grant was not readable");
         await recordConfigChangeWithClient(client, tenantId, { userId }, {
           objectType: "Grant",
-          objectId: id,
+          objectId: inserted.id,
           customerId: parsed.customer_id,
           before: null,
           after: grant,
@@ -166,6 +169,37 @@ export function registerGrantRoutes(app: FastifyInstance, pool: Pool) {
       return reply.send(voided);
     });
 
+    consoleRoute(scoped, "patch", "/grants/:id/amend", { role: ["Owner", "Billing Admin"] }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (!UUID_RE.test(id)) return reply.code(400).send({ error: "id must be a UUID" });
+      const parsed = validateAmendCommitInput(req.body);
+      if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
+      const { tenantId, userId } = req.consolePrincipal!;
+      const outcome = await withTenant(pool, tenantId, async (client) => {
+        const existing = await readGrant(client, tenantId, id);
+        if (!existing) return { kind: "missing" as const };
+        if (existing.status !== "active" || existing.source !== "commit") return { kind: "conflict" as const };
+        if (parsed.expiry_date && parsed.expiry_date.getTime() <= new Date(existing.start_date).getTime()) {
+          return { kind: "invalid" as const, error: "expiry_date must be after start_date" };
+        }
+        const amended = await amendCommit(client, tenantId, id, parsed);
+        if (!amended) return { kind: "conflict" as const };
+        await recordConfigChangeWithClient(client, tenantId, { userId }, {
+          objectType: "Grant",
+          objectId: id,
+          customerId: amended.after.customer_id,
+          before: amended.before,
+          after: amended.after,
+          reason: parsed.reason,
+        });
+        return { kind: "ok" as const, grant: amended.after };
+      });
+      if (outcome.kind === "missing") return reply.code(404).send({ error: "grant not found" });
+      if (outcome.kind === "invalid") return reply.code(400).send({ error: outcome.error });
+      if (outcome.kind === "conflict") return reply.code(409).send({ error: AMEND_CONFLICT });
+      return reply.send(outcome.grant);
+    });
+
     consoleRoute(scoped, "post", "/grant-templates", { role: ["Owner", "Billing Admin"] }, async (req, reply) => {
       const parsed = validateTemplateInput(req.body);
       if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
@@ -197,6 +231,8 @@ export function registerGrantRoutes(app: FastifyInstance, pool: Pool) {
         customer_id?: unknown;
         from?: unknown;
         to?: unknown;
+        entry_type?: unknown;
+        source?: unknown;
         limit?: unknown;
         cursor?: unknown;
       };
