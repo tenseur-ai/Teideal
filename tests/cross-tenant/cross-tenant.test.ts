@@ -88,6 +88,43 @@ describe("TEID-41-T2: cross-tenant regression across every API", () => {
     expect(ids).not.toContain(tenant2UsageEventId);
     expect(ids).toContain(tenant1UsageEventId);
   });
+
+  it("GET /idempotency-conflicts never exposes another tenant's review queue", async () => {
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const attackerKey = `cross-tenant-conflict-1001-${runId}`;
+    const victimKey = `cross-tenant-conflict-1002-${runId}`;
+
+    const attackerBody = {
+      customer_id: fx.tenant1.customerId,
+      event_type: "idempotency_isolation",
+      quantity: 1,
+      idempotency_key: attackerKey,
+    };
+    const victimBody = {
+      customer_id: fx.tenant2.customerId,
+      event_type: "idempotency_isolation",
+      quantity: 1,
+      idempotency_key: victimKey,
+    };
+    expect((await call(`${GO_USAGE_URL}/usage`, { method: "POST", apiKey: fx.tenant1.apiKey, body: attackerBody })).status).toBe(201);
+    expect((await call(`${GO_USAGE_URL}/usage`, { method: "POST", apiKey: fx.tenant1.apiKey, body: { ...attackerBody, quantity: 2 } })).status).toBe(409);
+    expect((await call(`${GO_USAGE_URL}/usage`, { method: "POST", apiKey: fx.tenant2.apiKey, body: victimBody })).status).toBe(201);
+    expect((await call(`${GO_USAGE_URL}/usage`, { method: "POST", apiKey: fx.tenant2.apiKey, body: { ...victimBody, quantity: 2 } })).status).toBe(409);
+
+    const filteredAttack = await call(
+      `${GO_USAGE_URL}/idempotency-conflicts?idempotency_key=${encodeURIComponent(victimKey)}`,
+      { apiKey: fx.tenant1.apiKey },
+    );
+    expect(filteredAttack.status).toBe(200);
+    expect(filteredAttack.body.data).toEqual([]);
+    expect(JSON.stringify(filteredAttack.body)).not.toContain(victimKey);
+
+    const attackerQueue = await call(`${GO_USAGE_URL}/idempotency-conflicts`, { apiKey: fx.tenant1.apiKey });
+    expect(attackerQueue.status).toBe(200);
+    const serialized = JSON.stringify(attackerQueue.body);
+    expect(serialized).toContain(attackerKey);
+    expect(serialized).not.toContain(victimKey);
+  });
 });
 
 describe("TEID-41-T7: SQL injection on a filter parameter", () => {
