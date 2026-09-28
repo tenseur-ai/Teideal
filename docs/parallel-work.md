@@ -311,20 +311,40 @@ so far and `main` has never diverged).
 | E03 -- usage ingestion and exactly-once ledger | Claude | Gemini (TEID-30), Codex (TEID-94/TEID-95, reassigned -- see below) | TEID-30 done (merged into Claude's branch, independently verified twice -- once per-branch, again post-merge alongside TEID-43 against a from-scratch DB rebuild); TEID-94 done (PR #9, merged as `946d3b3` -- Codex implemented after Gemini's auth turned out to be broken, see "Gemini auth" note below; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- currency-rounding 9/9, usage-ingestion 7/7 in isolation); TEID-95 done (PR #12, merged as `97e9fe0` -- retrofits `usage_events.quantity`'s float64 handling to `decimal.Decimal` end-to-end, the change TEID-94 deliberately deferred; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- large-quantities 7/7, usage-ingestion 7/7 re-run twice given this story touches that suite's own code, currency-rounding 9/9); TEID-96 done (PR #16, merged as `21dd675` -- DST-aware, month-end-clamped period-boundary computation plus an optional `occurred_at` field on `POST /usage`; found and resolved a real internal inconsistency in its own spec (architecture vs. one test's exclusive-end wording) in favor of the more precise architecture description; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- billing-periods 11/11 with T5's 4 DST/month-end cases confirmed individually named, usage-ingestion 7/7 re-run twice, currency-rounding 9/9, large-quantities 7/7; CI's only failure was the known data-export cold-start flake, confirmed via the exact same "Hook timed out"/"Test timed out" signature already documented below); next: TEID-31/32/33/35/34/97/36, none specced yet |
 | E01 -- entitlement model and pricing configuration | Claude | Cursor/Grok | TEID-16 done (PR #8, merged as `ffea8df` -- Grok implemented, committed, pushed, and opened its own PR fully unassisted, unsandboxed; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- plans 9/9, cross-tenant 32/32, console-auth 13/13, audit-log 7/7, api-keys 9/9, rbac 8/8, data-export 8/8). TEID-17 done (PR #13, merged as `187779b` -- the "grants" story TEID-44's own spec had flagged as not-yet-existing; Grok implemented, committed, pushed, and opened its own PR fully unassisted again; independently verified against a from-scratch DB rebuild and again on GitHub Actions -- grants 9/9, cross-tenant 41/41, console-auth 13/13, api-keys 9/9, rbac 8/8, plans 9/9, audit-log 7/7, data-export 8/8; Grok caught and fixed its own concurrency bug in T17-T7 during self-testing before ever handing it off). Lives in `services/ts-console` like E05, but a structurally separate file set (new `plans`/`plan_rates`/`grants`/`recurring_grant_templates`/`grant_ledger_entries` tables and routes -- nothing E05 owns). MVP order is TEID-16, 17, 18, 19, 20, 22, 23 (TEID-21 is phase-2, out of order for now). TEID-18 done (PR #17, merged as `a36c2a3` -- Grok implemented, committed, pushed, and opened its own PR fully unassisted again; independently verified against a from-scratch DB rebuild -- consumption-order 10/10, cross-tenant 45/45, console-auth 13/13, api-keys 9/9, rbac 8/8, audit-log 7/7, plans 9/9, grants 9/9, data-export 8/8 (one retry needed for the known TEID-44-T1 cold-start flake), `tsc --noEmit` clean; one minimal accepted deviation -- added `"put"` to `roleGuard.ts`'s method-type union for the new consumption-order endpoint). Next: TEID-19, not specced yet. |
 
-**New flake pattern found during TEID-17's verification (2026-09-27):**
-`tests/data-export` (TEID-44's own suite, already merged, untouched by
-TEID-17) intermittently hangs on its first test (`TEID-44-T1`,
-specifically the first call to `processPendingExports`) for the full
-120-180s hook/test timeout, then passes cleanly on an immediate retry
-with no code changes -- reproduced this exact "hangs once, clean
-retry" signature independently in this session (TEID-16's verification)
-and in both a local run and GitHub Actions CI during TEID-17's
-verification. Distinct from the already-known `tests/usage-ingestion`
-p99-latency flake (a threshold miss under load, not a hang) -- this one
-is a cold-start-shaped hang on the very first export-processing call in
-a fresh process, not a load test. Root cause not yet identified (checked
-and ruled out: Postgres connection exhaustion, a held lock, a missing
-`EXPORT_STORAGE_DIR`); worth investigating if it starts blocking a
-merge outright instead of clearing on retry.
+**Flake pattern found during TEID-17's verification (2026-09-27), investigated
+and closed out (2026-09-28):** `tests/data-export` (TEID-44's own suite,
+already merged) intermittently hangs on its first test (`TEID-44-T1`,
+inside `processPendingExports`'s first write of a session) for the full
+120-180s hook/test timeout, then passes cleanly on an immediate retry with
+no code changes -- reproduced repeatedly across TEID-16/17/18/96's CI runs
+and local repro attempts, and again in a dedicated root-cause investigation
+session. Distinct from the already-known `tests/usage-ingestion` p99-latency
+flake (a threshold miss under load, not a hang).
+
+Ruled out, each via direct measurement, not just circumstantial reasoning:
+cold `@dsnp/parquetjs` dynamic import (374ms plain Node, 119ms under
+vitest's own transform pipeline); the per-tenant `processPendingExports`
+claim loop (only 3 tenants exist by the time T1 runs in a fresh CI job;
+the loop itself completes in ~1ms); a suspected `JsonLinesWriter`
+event-loop-blocking defect (an isolated synthetic benchmark of the writer
+classes alone processed 450k rows in ~3s, and the real
+query+write pipeline -- real Postgres round trips, real `Promise.all`,
+real file writes, no vitest/server overhead -- processed 450,068 real rows
+for the accumulated-data tenant in ~8s); a missing index on
+`usage_events (tenant_id, occurred_at, id)` forcing a full parallel
+seq-scan+sort per 10k-row export batch (confirmed via `EXPLAIN ANALYZE`,
+but each batch still only cost ~60-90ms, nowhere near enough to explain a
+multi-hundred-second hang, and doesn't apply at all to T1's own 1-row
+scenario). No deterministic code-level cause was found in any of these
+paths. The observed pattern (rare, clears on immediate retry, no code
+correlation, seen on both a from-scratch CI runner and a local Windows
+dev machine) is most consistent with transient GC/OS/CI-runner scheduling
+jitter rather than a functional bug reachable by further unit-level
+investigation.
+
+Mitigation landed: `TEID-44-T1` now has vitest's `{ retry: 1 }` per-test
+option (scoped to this one test only, not a blanket timeout increase),
+matching the empirical "hangs once, clean retry" signature seen every
+time this has occurred.
 
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
