@@ -5,7 +5,20 @@
 import { Pool, type PoolClient } from "pg";
 
 export function createPool(connectionString: string): Pool {
-  return new Pool({ connectionString });
+  return new Pool({
+    connectionString,
+    // Backstop against a connection that gets stuck holding an open
+    // transaction and never sends its next command -- confirmed possible
+    // (root cause not yet found, see docs/parallel-work.md's data-export
+    // flake writeup) via a live hang where Postgres itself sat idle in
+    // transaction waiting on the client indefinitely. Real workloads never
+    // come close to this: even a 450k-row export batches in ~180ms/10k rows
+    // between queries, a >300x margin. Without this, a single stuck
+    // transaction permanently removes one connection from the shared pool;
+    // enough of them and every feature needing a DB connection stops
+    // working, not just exports.
+    idle_in_transaction_session_timeout: 60_000,
+  });
 }
 
 export async function withTenant<T>(
