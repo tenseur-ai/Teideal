@@ -26,6 +26,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 (cd "$REPO_ROOT" && git worktree add "$DEST" -b "$BRANCH" "$BASE")
 
-"$HOME/.grok/bin/grok.exe" --prompt-file "$PROMPT_FILE" --cwd "$DEST" \
+# grok.exe is a native Windows binary: a relative POSIX-style path like
+# `../teideal-agents/foo` is not reliably resolved (fails with "the system
+# cannot find the path specified"), even though the identical absolute path
+# works every time. Canonicalize to an absolute path (still POSIX-style,
+# which bash's argv-to-Windows translation *does* handle correctly for an
+# absolute path) before ever handing it to grok.exe.
+DEST_ABS="$(cd "$DEST" && pwd)"
+
+"$HOME/.grok/bin/grok.exe" --prompt-file "$PROMPT_FILE" --cwd "$DEST_ABS" \
   --always-approve --permission-mode bypassPermissions --output-format plain \
   > "$LOG_FILE" 2>&1
