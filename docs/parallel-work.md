@@ -347,4 +347,19 @@ option (scoped to this one test only, not a blanket timeout increase),
 matching the empirical "hangs once, clean retry" signature seen every
 time this has occurred.
 
+**Live CI confirmed the retry mechanism itself works, and surfaced one more
+real wrinkle (2026-09-28):** on a GitHub Actions rerun, T1 hung on attempt 1
+and was retried automatically -- all 8 tests in the file, including T1,
+were individually reported as passed. But the shared `afterAll` hook
+(`pool.end(); superPool.end();`) then hung for its own full 120s and failed
+the suite anyway. Explanation: vitest's retry does not cancel the abandoned
+first attempt's in-flight promise -- it can still be running in the
+background, holding a client checked out from the shared `pool`, and
+`pool.end()` correctly waits for every checked-out client to release before
+resolving. A retried run therefore needs real headroom in the cleanup hook,
+not a race against the default budget. Fixed by giving `afterAll` its own
+300s timeout (vitest's per-hook timeout argument), justified by what's
+actually happening in cleanup, not a blanket increase to the test's own SLA
+assertions.
+
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.

@@ -200,9 +200,15 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Wider than the default 120s hook budget: when T1's retry (below) fires,
+  // vitest does not cancel the abandoned first attempt's in-flight promise --
+  // it can still be holding a client checked out from `pool` in the
+  // background. `pool.end()` correctly waits for every checked-out client to
+  // be released before resolving, so a retried run needs real headroom here,
+  // not a race against the default budget.
   await pool.end();
   await superPool.end();
-});
+}, 300_000);
 
 describe("TEID-44 full data export", () => {
   // Retry once: this test has repeatedly shown a transient hang inside
