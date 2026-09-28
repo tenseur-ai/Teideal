@@ -389,4 +389,16 @@ This bounds the blast radius; it does not fix the underlying stuck-
 connection bug, which is still unresolved and worth a dedicated
 investigation session if it recurs.
 
+**Open item, not yet investigated: TEID-44-T2's relative-timing SLA flake
+(2026-09-28).** `tests/data-export/data-export.test.ts:286`
+(`expect(rangeElapsed).toBeLessThanOrEqual(fullElapsed * 2 + 100)`) failed
+once on GitHub Actions with `823ms` vs a `283ms` bound -- both absolute
+values are trivially fast, so this is CI-noise hitting a
+relative-ratio-between-two-timed-calls assertion, which is inherently
+flake-prone regardless of what either call is doing. Unrelated to the T1
+hang/retry/cleanup work above (T1 and T2 are different tests; nothing
+touched in this session's fixes runs anywhere near this code path or
+timescale). Not investigated further this session -- logged as an open
+item, not blocking.
+
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
