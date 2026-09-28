@@ -371,4 +371,22 @@ often, the next step is live `pg_stat_activity` instrumentation during an
 actual hang to find exactly which query/transaction is the one that's stuck
 and why.
 
+**Production impact and mitigation (2026-09-28):** this same
+`processPendingExports`/`processScheduledExports` code, and the same
+shared `pool`, run on a recurring production timer in
+`services/ts-console/src/server.ts` (`exportTimer`, guarded only by
+`NODE_ENV !== "test"`) -- not just in tests, against real customer data.
+Left unbounded, a stuck idle-in-transaction connection permanently removes
+one connection from the shared pool every time it happens; enough
+occurrences and every feature needing a DB connection stops working, not
+only exports. Added `idle_in_transaction_session_timeout: 60_000` to the
+pool config in `services/ts-console/src/lib/db.ts`'s `createPool` --
+Postgres will forcibly terminate any connection idle inside an open
+transaction past 60s, verified directly against a live Postgres 16
+instance. 60s is a >300x margin over every real measurement taken this
+session (a 450k-row export batches in ~180ms/10k rows between queries).
+This bounds the blast radius; it does not fix the underlying stuck-
+connection bug, which is still unresolved and worth a dedicated
+investigation session if it recurs.
+
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
