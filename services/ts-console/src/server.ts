@@ -16,12 +16,13 @@ import { registerConsumptionRoutes } from "./routes/consumption.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
-import { processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
+import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
 const GRANT_WORKER_INTERVAL_MS = 60 * 1000;
+const COMMIT_DRAWDOWN_INTERVAL_MS = 60 * 1000;
 
 export function buildServer() {
   const app = Fastify({ logger: false });
@@ -58,6 +59,7 @@ export function buildServer() {
   let sweepTimer: NodeJS.Timeout | undefined;
   let exportTimer: NodeJS.Timeout | undefined;
   let grantTimer: NodeJS.Timeout | undefined;
+  let commitTimer: NodeJS.Timeout | undefined;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -73,12 +75,17 @@ export function buildServer() {
       Promise.all([processRecurringGrants(pool), processExpiredGrants(pool)])
         .catch((err) => console.error("grant worker failed:", err));
     }, GRANT_WORKER_INTERVAL_MS);
+    // Tests call processCommitDrawdowns directly with a fixed instant.
+    commitTimer = setInterval(() => {
+      processCommitDrawdowns(pool).catch((err) => console.error("commit drawdown worker failed:", err));
+    }, COMMIT_DRAWDOWN_INTERVAL_MS);
   }
 
   app.addHook("onClose", async () => {
     if (sweepTimer) clearInterval(sweepTimer);
     if (exportTimer) clearInterval(exportTimer);
     if (grantTimer) clearInterval(grantTimer);
+    if (commitTimer) clearInterval(commitTimer);
     await pool.end();
   });
 

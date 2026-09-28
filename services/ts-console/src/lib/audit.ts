@@ -49,6 +49,9 @@ export interface ConfigChange {
   customerId?: string | null;
   before: unknown;
   after: unknown;
+  // audit_log has no reason column. Amend stores the operator's reason in
+  // the existing detail JSON so the row still records it.
+  reason?: string;
 }
 
 export async function recordConfigChange(
@@ -73,8 +76,8 @@ export async function recordConfigChangeWithClient(
   await client.query(
     `INSERT INTO audit_log (
        tenant_id, occurred_at, actor_user_id, actor_api_key_id, event_type,
-       object_type, object_id, customer_id, before, after
-     ) VALUES ($1, clock_timestamp(), $2, $3, 'config_change', $4, $5, $6, $7, $8)`,
+       object_type, object_id, customer_id, before, after, detail
+     ) VALUES ($1, clock_timestamp(), $2, $3, 'config_change', $4, $5, $6, $7, $8, $9)`,
     [
       tenantId,
       actorUserId,
@@ -84,6 +87,7 @@ export async function recordConfigChangeWithClient(
       change.customerId ?? null,
       JSON.stringify(change.before),
       JSON.stringify(change.after),
+      change.reason === undefined ? null : JSON.stringify({ reason: change.reason }),
     ],
   );
 }
