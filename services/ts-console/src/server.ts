@@ -13,6 +13,7 @@ import { registerPlanRoutes } from "./routes/plans.js";
 import { registerGrantRoutes } from "./routes/grants.js";
 import { registerConsumptionOrderRoutes } from "./routes/consumptionOrder.js";
 import { registerConsumptionRoutes } from "./routes/consumption.js";
+import { registerRateOverrideRoutes } from "./routes/rateOverrides.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
@@ -42,6 +43,7 @@ export function buildServer() {
   registerGrantRoutes(app, pool);
   registerConsumptionOrderRoutes(app, pool);
   registerConsumptionRoutes(app, pool);
+  registerRateOverrideRoutes(app, pool);
   registerUserRoutes(app, pool);
   registerExportRoutes(app, pool);
 
