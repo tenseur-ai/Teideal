@@ -1,0 +1,20 @@
+{
+  "name": "@teideal/ledger-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-32 acceptance suite: append-only double-entry ledger, reversals, integrity alerts, load, and adversarial database enforcement.",
+  "scripts": {
+    "test": "vitest run",
+    "fake-oncall": "node --experimental-strip-types fake-oncall.ts"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
