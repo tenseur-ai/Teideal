@@ -169,6 +169,14 @@ jobs:
         working-directory: tests/usage-ingestion
         run: npx vitest run
 
+      - name: Install idempotency suite dependencies
+        working-directory: tests/idempotency
+        run: npm ci
+
+      - name: Run TEID-31 acceptance suite (duplicate acknowledgement, retention expiry, conflict review, database-enforced concurrency)
+        working-directory: tests/idempotency
+        run: npx vitest run
+
       - name: Install currency rounding suite dependencies
         working-directory: tests/currency-rounding
         run: npm ci

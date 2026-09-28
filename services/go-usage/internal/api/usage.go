@@ -257,6 +257,44 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		)
 	})
 
+	// A 23505 aborts the transaction above, so classification/retry/conflict-
+	// recording happens in a second, separate transaction -- exactly the
+	// same shape the batch path already used before this story, and the only
+	// path that ever pays this extra round trip. Every ordinary (non-
+	// duplicate) insert costs exactly one transaction, same as before this
+	// story -- no savepoint, no added overhead on the hot path.
+	resultOutcome := outcomeInserted
+	var existing existingEvent
+	if !customerNotVisible && err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				outcome, ex, rerr := resolveIdempotencyConflict(
+					ctx, tx, req.IdempotencyKey, req.CustomerID, req.EventType, req.Quantity, time.Now(),
+				)
+				if rerr != nil {
+					return rerr
+				}
+				resultOutcome = outcome
+				existing = ex
+				switch outcome {
+				case outcomeInserted:
+					return insertUsageEvent(
+						ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
+						req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+					)
+				case outcomeConflict:
+					return recordConflict(
+						ctx, tx, principal.TenantID, req.IdempotencyKey, ex.ID,
+						req.CustomerID, req.EventType, req.Quantity,
+					)
+				default: // outcomeDuplicate
+					return nil
+				}
+			})
+		}
+	}
+
 	if customerNotVisible {
 		_ = security.LogBlocked(r.Context(), h.Pool.Pool, security.BlockedAttempt{
 			ActingTenantID: principal.TenantID,
@@ -269,13 +307,26 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		return
 	}
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			writeErr(w, http.StatusConflict, "idempotency_key already used for this tenant")
-			return
-		}
 		log.Printf("PostUsage: %v", err)
 		writeErr(w, http.StatusInternalServerError, "failed to record usage event")
+		return
+	}
+	if resultOutcome == outcomeDuplicate {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "duplicate",
+			"id":              existing.ID,
+			"customer_id":     existing.CustomerID,
+			"event_type":      existing.EventType,
+			"quantity":        existing.Quantity,
+			"idempotency_key": req.IdempotencyKey,
+		})
+		return
+	}
+	if resultOutcome == outcomeConflict {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":       idempotencyConflictMessage,
+			"existing_id": existing.ID,
+		})
 		return
 	}
 	created.Quantity, err = money.FromPGNumeric(createdQuantity)
@@ -380,6 +431,40 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			)
 		})
 
+		// Same second-transaction shape as postUsageSingle above -- see its
+		// comment. Only a 23505 ever pays this extra round trip.
+		resultOutcome := outcomeInserted
+		var existing existingEvent
+		if !customerNotVisible && err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+					outcome, ex, rerr := resolveIdempotencyConflict(
+						ctx, tx, *item.IdempotencyKey, *item.CustomerID, *item.EventType, qty, time.Now(),
+					)
+					if rerr != nil {
+						return rerr
+					}
+					resultOutcome = outcome
+					existing = ex
+					switch outcome {
+					case outcomeInserted:
+						return insertUsageEvent(
+							ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
+							*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+						)
+					case outcomeConflict:
+						return recordConflict(
+							ctx, tx, principal.TenantID, *item.IdempotencyKey, ex.ID,
+							*item.CustomerID, *item.EventType, qty,
+						)
+					default: // outcomeDuplicate
+						return nil
+					}
+				})
+			}
+		}
+
 		if customerNotVisible {
 			_ = security.LogBlocked(r.Context(), h.Pool.Pool, security.BlockedAttempt{
 				ActingTenantID: principal.TenantID,
@@ -393,22 +478,20 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 		}
 
 		if err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				var existingID string
-				lookupErr := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-					return tx.QueryRow(ctx, `SELECT id FROM usage_events WHERE idempotency_key = $1`, *item.IdempotencyKey).Scan(&existingID)
-				})
-				if lookupErr == nil {
-					results[i] = batchResultItem{
-						Status: "duplicate",
-						ID:     existingID,
-					}
-					continue
-				}
-			}
 			log.Printf("PostUsage batch item %d: %v", i, err)
 			results[i] = batchResultItem{Status: "error", Reason: "failed to record usage event"}
+			continue
+		}
+		if resultOutcome == outcomeDuplicate {
+			results[i] = batchResultItem{Status: "duplicate", ID: existing.ID}
+			continue
+		}
+		if resultOutcome == outcomeConflict {
+			results[i] = batchResultItem{
+				Status: "conflict",
+				ID:     existing.ID,
+				Reason: idempotencyConflictMessage,
+			}
 			continue
 		}
 		created.Quantity, err = money.FromPGNumeric(createdQuantity)
