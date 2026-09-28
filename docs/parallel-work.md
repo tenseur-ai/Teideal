@@ -401,4 +401,20 @@ touched in this session's fixes runs anywhere near this code path or
 timescale). Not investigated further this session -- logged as an open
 item, not blocking.
 
+**Open item, confirmed pre-existing and unrelated to any specific story
+(2026-09-28): `tests/usage-ingestion/load-test.test.ts:80`'s p99 latency
+SLA gate (`expect(...).toBeLessThanOrEqual(200)`).** Failed on GitHub
+Actions (not just a local dev machine) at `212ms`, `228ms`, and other
+values just over the 200ms threshold, across multiple unrelated commits --
+including on a commit (`e0ef409`, a one-line bash script fix with zero
+relation to `go-usage` or the usage-ingestion insert path) that predates
+any TEID-31 code changes entirely. This conclusively rules out any
+specific story's code as the cause -- it's the same class of relative/
+absolute-timing SLA flake as TEID-44-T2 above, just on a tighter absolute
+margin (200ms) that GitHub Actions' shared runners apparently cross often
+enough to matter. Mitigation: rerun the failed job (`gh run rerun <id>
+--failed`), matching this repo's established practice for this flake
+class. Not investigated further -- a real fix would mean loosening the
+threshold or making the test retry-aware, neither done this session.
+
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
