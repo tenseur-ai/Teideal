@@ -302,6 +302,25 @@ so far and `main` has never diverged).
 - **The live tracking board** (the published claude.ai artifact's
   `EMBEDDED_STATE`). Claude owns syncing this -- no developer agent has
   publish access to it.
+  **Current URL: `https://claude.ai/artifact/DHJth2uHYfvARADya6xNeZ`**
+  (republished 2026-09-28 -- the previous board, referenced in earlier
+  handover docs as `.../839FeX3RzSMymBpPySBYXj`, became unreadable this
+  session: it resolved as owned by a different account than this
+  session's, with no write access and only a lossy isolated-summary read.
+  The board's source app (`index.html`/`app.js`, uses the Artifact tool's
+  `artifact` capability to republish itself on every edit) lives on the
+  `claude/adoring-wright-lu1uyw` branch, a separate line of work from the
+  feature branches -- its `window.DATA` seed (all epics/stories/ac/tests)
+  was reused as-is; `window.EMBEDDED_STATE` was rebuilt from the user's
+  "Export progress" download plus this session's own completions
+  (TEID-19, TEID-31) folded in, and republished as a fresh artifact this
+  session owns. **If this session's own board access ever breaks again**,
+  the fix is the same: pull `index.html`/`app.js` from
+  `claude/adoring-wright-lu1uyw`, get current progress via that board's
+  own "Export progress" button (or reconstruct from this doc's phase
+  tables if that's unavailable too), splice the JSON into
+  `window.EMBEDDED_STATE=...;` in place of its `null`, and republish with
+  `capabilities: {artifact: {}}`.
 
 ## Current phases
 
