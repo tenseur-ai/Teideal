@@ -11,7 +11,8 @@ env:
   GO_USAGE_URL: http://127.0.0.1:8082
   FAKE_GOOGLE_URL: http://127.0.0.1:8090
   FAKE_S3_URL: http://127.0.0.1:8091
-  ONCALL_ALERT_WEBHOOK_URL: http://127.0.0.1:8092/alerts
+  FAKE_STRIPE_URL: http://127.0.0.1:8092
+  ONCALL_ALERT_WEBHOOK_URL: http://127.0.0.1:8093/alerts
   AWS_ENDPOINT_URL_OVERRIDE: http://127.0.0.1:8091
   CI: "true"
   PGPASSWORD: postgres
@@ -82,6 +83,13 @@ jobs:
           FAKE_S3_PORT=8091 npx tsx fake-s3.ts &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8091/healthz && break; sleep 1; done
 
+      - name: Install and start the fake Stripe service
+        working-directory: tests/stripe-connect
+        run: |
+          npm ci
+          FAKE_STRIPE_PORT=8092 npx tsx fake-stripe.ts &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8092/healthz && break; sleep 1; done
+
       - name: Install and start ts-console
         working-directory: services/ts-console
         run: |
@@ -91,6 +99,11 @@ jobs:
             NODE_ENV=test AWS_ENDPOINT_URL_OVERRIDE="$AWS_ENDPOINT_URL_OVERRIDE" EXPORT_STORAGE_DIR=/tmp/teideal-exports \
             GOOGLE_JWKS_URL="$FAKE_GOOGLE_URL/jwks" GOOGLE_ISSUER="$FAKE_GOOGLE_URL" GOOGLE_AUDIENCE="teideal-console-test" \
             GOOGLE_JWKS_CACHE_MAX_AGE_MS=0 \
+            STRIPE_CONNECT_BASE_URL="$FAKE_STRIPE_URL" \
+            STRIPE_CONNECT_CLIENT_ID=ca_test_teideal \
+            STRIPE_CONNECT_CLIENT_SECRET=sk_test_teideal_connect_secret \
+            STRIPE_CONNECT_REDIRECT_URI=http://127.0.0.1:8081/stripe/connect/oauth/return \
+            STRIPE_TOKEN_ENCRYPTION_KEY="02DWhpwMvIIHYMC/Z73W+qfHPlGd/gBN3riv9zqXQmY=" \
             node dist/server.js &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8081/healthz && break; sleep 1; done
 
@@ -166,6 +179,14 @@ jobs:
         working-directory: tests/commits
         run: npx vitest run
 
+      - name: Install stripe-connect suite dependencies
+        working-directory: tests/stripe-connect
+        run: npm ci
+
+      - name: Run TEID-37 acceptance suite (Stripe Connect read-only OAuth, scope upgrade, disconnect, adversarial code replay)
+        working-directory: tests/stripe-connect
+        run: npx vitest run
+
       - name: Install rate-overrides suite dependencies
         working-directory: tests/rate-overrides
         run: npm ci
@@ -198,8 +219,8 @@ jobs:
         working-directory: tests/ledger
         run: |
           npm ci
-          npm run fake-oncall &
-          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8092/healthz && break; sleep 1; done
+          FAKE_ONCALL_PORT=8093 npm run fake-oncall &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8093/healthz && break; sleep 1; done
 
       - name: Run TEID-32 acceptance suite (append-only ledger, reversals, integrity worker, load, adversarial enforcement)
         working-directory: tests/ledger

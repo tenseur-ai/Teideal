@@ -19,6 +19,8 @@ import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
 import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
+import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
+import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -46,6 +48,7 @@ export function buildServer() {
   registerRateOverrideRoutes(app, pool);
   registerUserRoutes(app, pool);
   registerExportRoutes(app, pool);
+  registerStripeConnectRoutes(app, pool);
 
   registerCustomerRoutes(app, pool);
 
@@ -98,6 +101,14 @@ export function buildServer() {
 // compiled entrypoint with NODE_ENV=test still needs to start the HTTP server;
 // NODE_ENV only controls the background timers above.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    assertStripeConfig();
+  } catch (err) {
+    const statusCode = err instanceof StripeConfigError ? err.statusCode : 400;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`ts-console: startup rejected (${statusCode}): ${message}`);
+    process.exit(1);
+  }
   const app = buildServer();
   const port = Number(process.env.PORT ?? 8081);
   app.listen({ port, host: "0.0.0.0" }, (err, address) => {
