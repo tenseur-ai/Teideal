@@ -1,0 +1,14 @@
+{
+  "name": "@teideal/sdk-integration-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-59 acceptance tests for the Python and TypeScript SDKs",
+  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
+  "dependencies": { "teideal-node": "file:../../sdks/typescript" },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

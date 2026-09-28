@@ -229,13 +229,86 @@ jobs:
         working-directory: tests/billing-periods
         run: npx vitest run
 
-  # TEID-41-AC3: a release that fails the suite above must not deploy.
-  # `needs: test` makes that structural -- this job is skipped outright if
-  # the test job fails, not merely warned about. There is no real
+  # TEID-59: SDK tests stay independent of the main application suite. They
+  # need only go-usage plus the two language toolchains.
+  sdk-tests:
+    runs-on: ubuntu-latest
+    env:
+      SDK_OFFLINE_TEST_DURATION_MS: "100"
+      SDK_LATENCY_BENCHMARK_EVENTS_PER_MIN: "25"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: teideal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Apply database migrations
+        run: PSQL_SUPERUSER=postgres bash db/setup-local.sh
+
+      - name: Seed SDK test fixtures
+        run: PSQL_SUPERUSER=postgres bash db/seed-test-fixtures.sh
+
+      - name: Build and start go-usage
+        working-directory: services/go-usage
+        run: |
+          go build -o /tmp/go-usage ./cmd/server
+          PORT=8082 DATABASE_URL="$DATABASE_URL" /tmp/go-usage &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8082/healthz && break; sleep 1; done
+
+      - name: Install, type-check, and test Python SDK
+        working-directory: sdks/python
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m mypy teideal
+          python -m pytest
+
+      - name: Install, type-check, build, and test TypeScript SDK
+        working-directory: sdks/typescript
+        run: |
+          npm install
+          npm run typecheck
+          npm run build
+          npm test
+
+      - name: Install SDK integration suite dependencies
+        working-directory: tests/sdk-integration
+        run: npm install
+
+      - name: Run TEID-59 acceptance suite (T1-T4, T6, T8; T7/T9 are package-local)
+        working-directory: tests/sdk-integration
+        run: npm test
+
+  # TEID-41-AC3 / TEID-59: a release that fails either suite must not deploy.
+  # `needs: [test, sdk-tests]` makes that structural -- this job is skipped
+  # outright if either job fails, not merely warned about. There is no real
   # deployment target configured yet (that is a separate infra decision);
   # this stage exists to prove and hold the gate itself.
   deploy:
-    needs: test
+    needs: [test, sdk-tests]
     runs-on: ubuntu-latest
     steps:
       - run: 'echo "TEID-41-AC3: cross-tenant suite passed -- deploy stage would run here."'

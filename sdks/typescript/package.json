@@ -1,0 +1,24 @@
+{
+  "name": "teideal-node",
+  "version": "0.1.0",
+  "description": "Official TypeScript/Node SDK for sending usage events to Teideal",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepare": "npm run build"
+  },
+  "keywords": ["teideal", "usage", "billing", "sdk"],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  },
+  "engines": { "node": ">=18" }
+}
