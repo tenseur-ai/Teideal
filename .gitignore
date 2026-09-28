@@ -9,6 +9,17 @@ dist/
 # Go
 /services/go-usage/go-usage
 /services/go-usage/go-usage.exe
+.gocache/
+
+# Python
+__pycache__/
+*.py[cod]
+build/
+*.egg-info/
+.pytest-tmp*/
+
+# Locally compiled test doubles
+dist-fake/
 
 # Generated, dev-only test fixtures (contains only fixed dev API keys, never real credentials)
 tests/cross-tenant/.fixtures.json
