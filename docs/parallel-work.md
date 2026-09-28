@@ -335,31 +335,40 @@ for the accumulated-data tenant in ~8s); a missing index on
 seq-scan+sort per 10k-row export batch (confirmed via `EXPLAIN ANALYZE`,
 but each batch still only cost ~60-90ms, nowhere near enough to explain a
 multi-hundred-second hang, and doesn't apply at all to T1's own 1-row
-scenario). No deterministic code-level cause was found in any of these
-paths. The observed pattern (rare, clears on immediate retry, no code
-correlation, seen on both a from-scratch CI runner and a local Windows
-dev machine) is most consistent with transient GC/OS/CI-runner scheduling
-jitter rather than a functional bug reachable by further unit-level
-investigation.
+scenario). No deterministic code-level cause was found in the
+export-writer/query code paths specifically.
 
 Mitigation landed: `TEID-44-T1` now has vitest's `{ retry: 1 }` per-test
 option (scoped to this one test only, not a blanket timeout increase),
 matching the empirical "hangs once, clean retry" signature seen every
 time this has occurred.
 
-**Live CI confirmed the retry mechanism itself works, and surfaced one more
-real wrinkle (2026-09-28):** on a GitHub Actions rerun, T1 hung on attempt 1
-and was retried automatically -- all 8 tests in the file, including T1,
-were individually reported as passed. But the shared `afterAll` hook
-(`pool.end(); superPool.end();`) then hung for its own full 120s and failed
-the suite anyway. Explanation: vitest's retry does not cancel the abandoned
-first attempt's in-flight promise -- it can still be running in the
-background, holding a client checked out from the shared `pool`, and
-`pool.end()` correctly waits for every checked-out client to release before
-resolving. A retried run therefore needs real headroom in the cleanup hook,
-not a race against the default budget. Fixed by giving `afterAll` its own
-300s timeout (vitest's per-hook timeout argument), justified by what's
-actually happening in cleanup, not a blanket increase to the test's own SLA
-assertions.
+**Live CI confirmed the retry mechanism itself works, but revealed this is
+a genuine indefinite hang, not mere jitter (2026-09-28):** on a GitHub
+Actions rerun, T1 hung on attempt 1 and was retried automatically -- all 8
+tests in the file, including T1, were individually reported as passed. But
+the shared `afterAll` hook (`pool.end(); superPool.end();`) then hung and
+failed the suite anyway. First hypothesis -- vitest's retry doesn't cancel
+the abandoned first attempt's in-flight promise, so a lingering client
+checked out from the shared `pool` just needed more time to release before
+`pool.end()` could resolve -- was directly tested and **disproven**:
+widening the hook's timeout from 120s to 300s made no difference at all; it
+hung for the full 300s again, identically. A hang that's unaffected by a
+2.5x larger budget is not a slow drain, it's a connection that never
+releases on its own -- i.e. a real, still-unlocated stuck
+connection/transaction bug somewhere in this path, not transient CI/GC
+jitter as first concluded. That specific bug remains **unresolved and is
+real follow-up debt**, not something this session's investigation found.
+
+Given the actual test assertions (T1-T8) all pass even when this happens,
+and `afterAll`'s only job here is best-effort graceful pool shutdown (not a
+correctness assertion), the pragmatic fix landed is to stop letting cleanup
+block the suite: `pool.end()`/`superPool.end()` are now each raced against a
+10s timeout inside `afterAll` (a `closeWithTimeout` helper), logging a
+warning and proceeding rather than failing if a client never releases. This
+unblocks CI without claiming the underlying leak is fixed -- if it recurs
+often, the next step is live `pg_stat_activity` instrumentation during an
+actual hang to find exactly which query/transaction is the one that's stuck
+and why.
 
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
