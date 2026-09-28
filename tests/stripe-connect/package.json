@@ -1,0 +1,23 @@
+{
+  "name": "@teideal/stripe-connect-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-37 acceptance suite: Stripe Connect read-only OAuth, separate write re-authorization, disconnect, and adversarial code replay.",
+  "scripts": {
+    "test": "vitest run",
+    "fake-stripe": "tsx fake-stripe.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.12",
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
