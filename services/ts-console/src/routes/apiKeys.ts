@@ -58,7 +58,7 @@ function generateKey(environment: KeyEnvironment): GeneratedKey {
   };
 }
 
-async function insertKey(
+export async function insertKey(
   client: PoolClient,
   tenantId: string,
   creatorUserId: string,

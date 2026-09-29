@@ -4,6 +4,7 @@ import { recordConfigChangeWithClient } from "../lib/audit.js";
 import { withTenant } from "../lib/db.js";
 import { consoleRoute } from "../lib/roleGuard.js";
 import { requireSession } from "../lib/sessionAuth.js";
+import { ownedSandbox } from "./sandbox.js";
 import {
   READ_ONLY_NOTICE,
   StripeOAuthError,
@@ -58,11 +59,22 @@ export function registerStripeConnectRoutes(app: FastifyInstance, pool: Pool) {
     scoped.addHook("preHandler", requireSession(pool));
 
     consoleRoute(scoped, "get", "/stripe/connect/authorize-url", { role: [...ROLES] }, async (req, reply) => {
-      const query = (req.query ?? {}) as { scope?: unknown };
+      const query = (req.query ?? {}) as { scope?: unknown; sandbox_id?: unknown };
       const scope = parseScope(query.scope, "read_only");
       if (typeof scope !== "string") return reply.code(400).send({ error: scope.error });
       const { tenantId, userId } = req.consolePrincipal!;
-      const url = await buildAuthorizeUrl(tenantId, userId, scope);
+      // An operator can connect Stripe for their own tenant, or -- naming a
+      // sandbox they own -- for that sandbox instead. Either way the signed
+      // state's tenantId is the real target the callback will write under.
+      let targetTenantId = tenantId;
+      if (typeof query.sandbox_id === "string" && query.sandbox_id.length > 0) {
+        if (!UUID_RE.test(query.sandbox_id)) return reply.code(400).send({ error: "sandbox_id must be a UUID" });
+        if (!(await ownedSandbox(pool, query.sandbox_id, tenantId))) {
+          return reply.code(403).send({ error: "sandbox is not accessible to this operator" });
+        }
+        targetTenantId = query.sandbox_id;
+      }
+      const url = await buildAuthorizeUrl(targetTenantId, userId, scope);
       return reply.send({ url, notice: READ_ONLY_NOTICE });
     });
 
@@ -74,10 +86,25 @@ export function registerStripeConnectRoutes(app: FastifyInstance, pool: Pool) {
       const { tenantId, userId } = req.consolePrincipal!;
       try {
         const state = await verifyState(body.state);
-        if (state.tenantId !== tenantId || state.userId !== userId) {
+        // The state's tenantId is the connection's real target -- the
+        // caller's own tenant, or a sandbox they own (see the authorize-url
+        // handler above). Either way the signed-in operator must match, and
+        // the target must be one this operator is actually allowed to act
+        // for -- this is the anti-hijack check a leaked code+state pair
+        // can't pass from a different session.
+        const targetIsCaller = state.tenantId === tenantId;
+        const targetIsOwnedSandbox = !targetIsCaller && Boolean(await ownedSandbox(pool, state.tenantId, tenantId));
+        if (state.userId !== userId || !(targetIsCaller || targetIsOwnedSandbox)) {
           return reply.code(400).send({ error: "oauth state does not match the signed-in operator" });
         }
         const exchanged = await exchangeCode(body.code);
+        const tenant = (await pool.query<{ kind: "production" | "sandbox" }>(
+          `SELECT kind FROM tenants WHERE id = $1`,
+          [state.tenantId],
+        )).rows[0];
+        if (tenant?.kind === "sandbox" && exchanged.livemode) {
+          return reply.code(403).send({ error: "a sandbox cannot connect a live Stripe account" });
+        }
         // Stripe is the authority for the granted scope, but it must match
         // the scope this operator actually requested. A wider grant would be
         // the silent upgrade AC3 forbids.
@@ -85,7 +112,7 @@ export function registerStripeConnectRoutes(app: FastifyInstance, pool: Pool) {
           throw new StripeOAuthError("stripe granted a different scope than the one requested");
         }
         const encrypted = encryptToken(exchanged.accessToken);
-        const created = await withTenant(pool, tenantId, async (client) => {
+        const created = await withTenant(pool, state.tenantId, async (client) => {
           const row = (await client.query<ConnectionRow>(
             `INSERT INTO stripe_connections (
                tenant_id, stripe_account_id, access_token_ciphertext, access_token_iv, access_token_auth_tag,
@@ -93,7 +120,7 @@ export function registerStripeConnectRoutes(app: FastifyInstance, pool: Pool) {
              ) VALUES ($1, $2, $3, $4, $5, $6, 'connected', $7)
              RETURNING id, stripe_account_id, scope, status, connected_at`,
             [
-              tenantId,
+              state.tenantId,
               exchanged.stripeAccountId,
               encrypted.ciphertext,
               encrypted.iv,
@@ -102,7 +129,7 @@ export function registerStripeConnectRoutes(app: FastifyInstance, pool: Pool) {
               userId,
             ],
           )).rows[0];
-          await recordConfigChangeWithClient(client, tenantId, { userId }, {
+          await recordConfigChangeWithClient(client, state.tenantId, { userId }, {
             objectType: "StripeConnection",
             objectId: row.id,
             before: null,
