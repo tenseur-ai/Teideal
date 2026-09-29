@@ -30,13 +30,13 @@ type Handlers struct {
 }
 
 type usageEvent struct {
-	ID             string          `json:"id"`
-	CustomerID     string          `json:"customer_id"`
-	EventType      string          `json:"event_type"`
-	Quantity       decimal.Decimal `json:"quantity"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	OccurredAt     time.Time       `json:"occurred_at"`
-	IsPriorPeriodAdjustment bool   `json:"is_prior_period_adjustment"`
+	ID                      string          `json:"id"`
+	CustomerID              string          `json:"customer_id"`
+	EventType               string          `json:"event_type"`
+	Quantity                decimal.Decimal `json:"quantity"`
+	IdempotencyKey          string          `json:"idempotency_key"`
+	OccurredAt              time.Time       `json:"occurred_at"`
+	IsPriorPeriodAdjustment bool            `json:"is_prior_period_adjustment"`
 }
 
 var eventTypeRegex = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
@@ -75,11 +75,31 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func metricFilter(r *http.Request) *string {
+	raw := r.URL.Query().Get("metric")
+	if raw == "" {
+		raw = r.URL.Query().Get("event_type")
+	}
+	if raw == "" {
+		return nil
+	}
+	return &raw
+}
+
+type usageBucket struct {
+	Hour          time.Time       `json:"hour"`
+	EventType     string          `json:"event_type"`
+	Count         int64           `json:"count"`
+	TotalQuantity decimal.Decimal `json:"total_quantity"`
+}
+
 // GetUsage handles GET /usage?customer_id=<uuid>. The filter is validated as
 // a UUID *before* it ever reaches a query -- an adversarial string (e.g. a
 // SQL-injection payload) is rejected outright rather than being compared
 // against a column, and the query that does run is fully parameterized
 // regardless. RLS then confines the result set to the caller's own tenant.
+//
+// group_by=hour pushes hourly aggregation to Postgres (TEID-45 AC4/T4).
 func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -93,7 +113,13 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "customer_id must be a UUID")
 			return
 		}
+		if scopedToOtherCustomer(principal, raw) {
+			denyCustomerNotVisible(w, r, h, principal, "/usage", "customer_id not visible to caller's tenant")
+			return
+		}
 		customerFilter = &raw
+	} else if principal.CustomerID != nil {
+		customerFilter = principal.CustomerID
 	}
 	var priorPeriodAdjustmentFilter *bool
 	if raw, present := r.URL.Query()["prior_period_adjustments"]; present {
@@ -104,18 +130,54 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		value := raw[0] == "true"
 		priorPeriodAdjustmentFilter = &value
 	}
+	since, until, err := parseSinceUntil(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	groupBy := r.URL.Query().Get("group_by")
+	if groupBy != "" && groupBy != "hour" {
+		writeErr(w, http.StatusBadRequest, "group_by must be hour")
+		return
+	}
+	if groupBy == "hour" {
+		h.getUsageBuckets(w, r, principal, customerFilter, since, until)
+		return
+	}
+
+	limit, err := parseLimit(r.URL.Query().Get("limit"), defaultUsageLimit, maxListLimit)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cursorTime, cursorID, err := decodeTimeIDCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var cursorTimeArg *time.Time
+	var cursorIDArg *string
+	if cursorID != "" {
+		cursorTimeArg = &cursorTime
+		cursorIDArg = &cursorID
+	}
+	metric := metricFilter(r)
 
 	events := []usageEvent{}
-	err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, customer_id, event_type, quantity, idempotency_key, occurred_at,
 			       is_prior_period_adjustment
 			FROM usage_events
 			WHERE ($1::uuid IS NULL OR customer_id = $1)
 			  AND ($2::boolean IS NULL OR is_prior_period_adjustment = $2)
-			ORDER BY occurred_at DESC
-			LIMIT 200
-		`, customerFilter, priorPeriodAdjustmentFilter)
+			  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
+			  AND ($4::timestamptz IS NULL OR occurred_at < $4)
+			  AND ($5::text IS NULL OR event_type = $5 OR event_type LIKE $5 || '.%')
+			  AND ($6::timestamptz IS NULL OR (occurred_at, id) < ($6, $7::uuid))
+			ORDER BY occurred_at DESC, id DESC
+			LIMIT $8
+		`, customerFilter, priorPeriodAdjustmentFilter, since, until, metric, cursorTimeArg, cursorIDArg, limit+1)
 		if err != nil {
 			return err
 		}
@@ -143,7 +205,88 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"data": events})
+	var next *string
+	if len(events) > limit {
+		events = events[:limit]
+		c := encodeTimeIDCursor(events[len(events)-1].OccurredAt, events[len(events)-1].ID)
+		next = &c
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": events, "cursor": next})
+}
+
+func (h *Handlers) getUsageBuckets(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal auth.Principal,
+	customerFilter *string,
+	since, until *time.Time,
+) {
+	limit, err := parseLimit(r.URL.Query().Get("limit"), 10_000, 100_000)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	metric := metricFilter(r)
+	cursorTime, cursorID, err := decodeTimeIDCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var cursorTimeArg *time.Time
+	var cursorTypeArg *string
+	if cursorID != "" {
+		cursorTimeArg = &cursorTime
+		cursorTypeArg = &cursorID
+	}
+
+	buckets := []usageBucket{}
+	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT hour, event_type, event_count, total_quantity
+			FROM (
+				SELECT date_trunc('hour', occurred_at) AS hour, event_type,
+				       COUNT(*) AS event_count, COALESCE(SUM(quantity), 0) AS total_quantity
+				FROM usage_events
+				WHERE ($1::uuid IS NULL OR customer_id = $1)
+				  AND ($2::timestamptz IS NULL OR occurred_at >= $2)
+				  AND ($3::timestamptz IS NULL OR occurred_at < $3)
+				  AND ($4::text IS NULL OR event_type = $4 OR event_type LIKE $4 || '.%')
+				GROUP BY 1, 2
+			) buckets
+			WHERE ($5::timestamptz IS NULL OR (hour, event_type) < ($5, $6::text))
+			ORDER BY hour DESC, event_type DESC
+			LIMIT $7
+		`, customerFilter, since, until, metric, cursorTimeArg, cursorTypeArg, limit+1)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var b usageBucket
+			var total pgtype.Numeric
+			if err := rows.Scan(&b.Hour, &b.EventType, &b.Count, &total); err != nil {
+				return err
+			}
+			b.TotalQuantity, err = money.FromPGNumeric(total)
+			if err != nil {
+				return err
+			}
+			buckets = append(buckets, b)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		log.Printf("GetUsage buckets: %v", err)
+		writeErr(w, http.StatusInternalServerError, "failed to bucket usage events")
+		return
+	}
+	var next *string
+	if len(buckets) > limit {
+		buckets = buckets[:limit]
+		c := encodeTimeIDCursor(buckets[len(buckets)-1].Hour, buckets[len(buckets)-1].EventType)
+		next = &c
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": buckets, "cursor": next})
 }
 
 type postUsageRequest struct {
@@ -397,30 +540,30 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 					existing.Quantity = adjustment.Quantity
 				}
 			} else {
-			err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-				outcome, ex, rerr := resolveIdempotencyConflict(
-					ctx, tx, req.IdempotencyKey, req.CustomerID, req.EventType, req.Quantity, time.Now(),
-				)
-				if rerr != nil {
-					return rerr
-				}
-				resultOutcome = outcome
-				existing = ex
-				switch outcome {
-				case outcomeInserted:
-					return insertUsageEvent(
-						ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
-						req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+				err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+					outcome, ex, rerr := resolveIdempotencyConflict(
+						ctx, tx, req.IdempotencyKey, req.CustomerID, req.EventType, req.Quantity, time.Now(),
 					)
-				case outcomeConflict:
-					return recordConflict(
-						ctx, tx, principal.TenantID, req.IdempotencyKey, ex.ID,
-						req.CustomerID, req.EventType, req.Quantity,
-					)
-				default: // outcomeDuplicate
-					return nil
-				}
-			})
+					if rerr != nil {
+						return rerr
+					}
+					resultOutcome = outcome
+					existing = ex
+					switch outcome {
+					case outcomeInserted:
+						return insertUsageEvent(
+							ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
+							req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+						)
+					case outcomeConflict:
+						return recordConflict(
+							ctx, tx, principal.TenantID, req.IdempotencyKey, ex.ID,
+							req.CustomerID, req.EventType, req.Quantity,
+						)
+					default: // outcomeDuplicate
+						return nil
+					}
+				})
 			}
 		}
 	}

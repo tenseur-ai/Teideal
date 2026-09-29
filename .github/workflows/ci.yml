@@ -267,6 +267,14 @@ jobs:
         working-directory: tests/ledger
         run: npx vitest run
 
+      - name: Install customer-timeline suite dependencies
+        working-directory: tests/customer-timeline
+        run: npm ci
+
+      - name: Run TEID-45 acceptance suite (customer timeline aggregation, hourly buckets, drill-down, isolation)
+        working-directory: tests/customer-timeline
+        run: npx vitest run
+
       - name: Install currency rounding suite dependencies
         working-directory: tests/currency-rounding
         run: npm ci

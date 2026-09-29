@@ -10,6 +10,7 @@ export interface Principal {
   tenantKey: string;
   apiKeyId: string;
   scope: string;
+  customerId: string | null;
 }
 
 declare module "fastify" {
@@ -23,8 +24,14 @@ function hashKey(plaintext: string): string {
 }
 
 export async function resolveApiKey(pool: Pool, plaintextKey: string): Promise<Principal | null> {
-  const { rows } = await pool.query<{ id: string; external_key: string; api_key_id: string; scope: string }>(
-    `SELECT t.id, t.external_key, k.id AS api_key_id, k.scope
+  const { rows } = await pool.query<{
+    id: string;
+    external_key: string;
+    api_key_id: string;
+    scope: string;
+    customer_id: string | null;
+  }>(
+    `SELECT t.id, t.external_key, k.id AS api_key_id, k.scope, k.customer_id
      FROM api_keys k
      JOIN tenants t ON t.id = k.issued_to_tenant_id
      WHERE k.key_hash = $1
@@ -35,7 +42,13 @@ export async function resolveApiKey(pool: Pool, plaintextKey: string): Promise<P
   if (rows.length === 0) return null;
   const row = rows[0];
   await pool.query(`UPDATE api_keys SET last_used_at = now() WHERE id = $1`, [row.api_key_id]).catch(() => undefined);
-  return { tenantId: row.id, tenantKey: row.external_key, apiKeyId: row.api_key_id, scope: row.scope };
+  return {
+    tenantId: row.id,
+    tenantKey: row.external_key,
+    apiKeyId: row.api_key_id,
+    scope: row.scope,
+    customerId: row.customer_id,
+  };
 }
 
 export function requireAuth(pool: Pool, requiredScope?: string) {
