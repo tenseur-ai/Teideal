@@ -20,6 +20,8 @@ import { processPendingExports, processScheduledExports } from "./lib/exportWork
 import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
+import { registerStripeCustomerRoutes } from "./routes/stripeCustomers.js";
+import { stripeApiBaseUrl } from "./lib/stripeCustomers.js";
 import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
@@ -49,6 +51,8 @@ export function buildServer() {
   registerUserRoutes(app, pool);
   registerExportRoutes(app, pool);
   registerStripeConnectRoutes(app, pool);
+  registerStripeCustomerRoutes(app, pool);
+  stripeApiBaseUrl();
 
   registerCustomerRoutes(app, pool);
 

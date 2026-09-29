@@ -208,3 +208,147 @@ describe("TEID-37 cross-tenant Stripe Connect isolation", () => {
     expect(fresh.some((entry) => entry.path === "/oauth/deauthorize" && entry.requestBody.includes(VICTIM_ACCOUNT))).toBe(false);
   });
 });
+
+describe("TEID-38 cross-tenant Stripe customer isolation", () => {
+  let victimCandidateId: string;
+  let victimStripeCustomerId: string;
+
+  beforeAll(async () => {
+    victimStripeCustomerId = `cus_victim_${randomUUID()}`;
+    victimCandidateId = await withTenant(fx.tenant2.id, async (client) =>
+      (await client.query<{ id: string }>(
+        `INSERT INTO stripe_customer_match_candidates (
+           tenant_id, stripe_customer_id, stripe_name, stripe_email, status
+         ) VALUES ($1, $2, 'Victim Stripe', $3, 'pending')
+         RETURNING id`,
+        [fx.tenant2.id, victimStripeCustomerId, `victim-${randomUUID()}@acct-1002.test`],
+      )).rows[0].id,
+    );
+  });
+
+  async function connectAttacker(scope: "read_only" | "read_write") {
+    const started = await call(`${TS_CONSOLE_URL}/stripe/connect/authorize-url?scope=${scope}`, { token: attackerToken });
+    expect(started.status).toBe(200);
+    const redeemed = await redeem(started.body.url);
+    const created = await call(`${TS_CONSOLE_URL}/stripe/connect/callback`, {
+      method: "POST",
+      token: attackerToken,
+      body: { code: redeemed.code, state: redeemed.state },
+    });
+    expect(created.status).toBe(201);
+    const log = await fakeLog();
+    const hit = [...log].reverse().find((row) =>
+      row.path === "/oauth/token" && row.requestBody.includes(`code=${redeemed.code}`) && row.responseStatus === 200,
+    );
+    expect(hit).toBeTruthy();
+    return { created, accessToken: JSON.parse(hit!.responseBody).access_token as string };
+  }
+
+  it("POST /stripe/customers/sync writes only the caller's tenant", async () => {
+    const before = await withTenant(fx.tenant2.id, async (client) => ({
+      links: (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM stripe_customer_links`)).rows[0].n,
+      candidates: (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM stripe_customer_match_candidates`)).rows[0].n,
+    }));
+    const { accessToken } = await connectAttacker("read_only");
+    const seedId = `cus_attacker_sync_${randomUUID()}`;
+    const seeded = await fetch(`${FAKE_STRIPE_URL}/_seed/customers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: accessToken,
+        customers: [{ id: seedId, name: "Attacker Sync", email: `attacker-sync-${randomUUID()}@acct-1001.test` }],
+      }),
+    });
+    expect(seeded.status).toBe(200);
+
+    const response = await call(`${TS_CONSOLE_URL}/stripe/customers/sync`, {
+      method: "POST",
+      token: attackerToken,
+      body: { tenant_id: fx.tenant2.id },
+    });
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).not.toContain(victimCandidateId);
+    expect(JSON.stringify(response.body)).not.toContain(victimStripeCustomerId);
+
+    const after = await withTenant(fx.tenant2.id, async (client) => ({
+      links: (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM stripe_customer_links`)).rows[0].n,
+      candidates: (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM stripe_customer_match_candidates`)).rows[0].n,
+      victim: (await client.query<{ status: string }>(
+        `SELECT status FROM stripe_customer_match_candidates WHERE id = $1`,
+        [victimCandidateId],
+      )).rows[0],
+    }));
+    expect(after.links).toBe(before.links);
+    expect(after.candidates).toBe(before.candidates);
+    expect(after.victim.status).toBe("pending");
+  });
+
+  it("GET /stripe/customers/match-candidates does not list another tenant's pending matches", async () => {
+    const response = await call(
+      `${TS_CONSOLE_URL}/stripe/customers/match-candidates?tenant_id=${fx.tenant2.id}`,
+      { token: attackerToken },
+    );
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(response.body)).not.toContain(victimCandidateId);
+    expect(JSON.stringify(response.body)).not.toContain(victimStripeCustomerId);
+    const ids = (response.body.data as Array<{ id: string; stripe_customer_id: string }>).map((row) => row.id);
+    expect(ids).not.toContain(victimCandidateId);
+  });
+
+  it("POST /stripe/customers/:customerId/link-stripe does not link another tenant's customer", async () => {
+    const { accessToken } = await connectAttacker("read_write");
+    const stripeId = `cus_attacker_link_${randomUUID()}`;
+    const seeded = await fetch(`${FAKE_STRIPE_URL}/_seed/customers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: accessToken,
+        customers: [{ id: stripeId, name: "Attacker Link", email: `attacker-link-${randomUUID()}@acct-1001.test` }],
+      }),
+    });
+    expect(seeded.status).toBe(200);
+
+    const response = await call(`${TS_CONSOLE_URL}/stripe/customers/${fx.tenant2.customerId}/link-stripe`, {
+      method: "POST",
+      token: attackerToken,
+      body: { stripe_customer_id: stripeId },
+    });
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "customer not found" });
+    expect(JSON.stringify(response.body)).not.toContain(fx.tenant2.customerId);
+    expect(JSON.stringify(response.body)).not.toContain(victimStripeCustomerId);
+
+    const victimLinks = await withTenant(fx.tenant2.id, async (client) =>
+      (await client.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM stripe_customer_links WHERE customer_id = $1`,
+        [fx.tenant2.customerId],
+      )).rows[0].n,
+    );
+    expect(victimLinks).toBe(0);
+  });
+
+  it("POST /stripe/candidates/:id/create-in-teideal does not resolve another tenant's candidate", async () => {
+    const response = await call(`${TS_CONSOLE_URL}/stripe/candidates/${victimCandidateId}/create-in-teideal`, {
+      method: "POST",
+      token: attackerToken,
+      body: {},
+    });
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: "match candidate not found" });
+    expect(JSON.stringify(response.body)).not.toContain(victimCandidateId);
+    expect(JSON.stringify(response.body)).not.toContain(victimStripeCustomerId);
+
+    const victim = await withTenant(fx.tenant2.id, async (client) =>
+      (await client.query<{ status: string; stripe_customer_id: string }>(
+        `SELECT status, stripe_customer_id FROM stripe_customer_match_candidates WHERE id = $1`,
+        [victimCandidateId],
+      )).rows[0],
+    );
+    expect(victim.status).toBe("pending");
+    expect(victim.stripe_customer_id).toBe(victimStripeCustomerId);
+    const victimCustomers = await withTenant(fx.tenant2.id, async (client) =>
+      (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM stripe_customer_links`)).rows[0].n,
+    );
+    expect(victimCustomers).toBe(0);
+  });
+});
