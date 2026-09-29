@@ -172,6 +172,14 @@ jobs:
         working-directory: tests/consumption-order
         run: npx vitest run
 
+      - name: Install replay-consistency suite dependencies
+        working-directory: tests/replay-consistency
+        run: npm ci
+
+      - name: Run TEID-35 acceptance suite (timestamp-ordered deterministic replay)
+        working-directory: tests/replay-consistency
+        run: npx vitest run
+
       - name: Install commits suite dependencies
         working-directory: tests/commits
         run: npm ci

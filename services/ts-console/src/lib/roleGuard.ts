@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyRequest, FastifyReply, RouteShorthandOptions } from "fastify";
 import type { Role } from "./users.js";
 
 export type ConsoleAuth = { role: Role[] } | { selfService: true };
@@ -24,7 +24,8 @@ export function consoleRoute(
   url: string,
   auth: ConsoleAuth,
   handler: (req: FastifyRequest, reply: FastifyReply) => unknown,
+  options: RouteShorthandOptions = {},
 ): void {
   CONSOLE_ROUTE_AUDIT.push({ method, url, auth });
-  scoped[method](url, { preHandler: guard(auth) }, handler);
+  scoped[method](url, { ...options, preHandler: guard(auth) }, handler);
 }
