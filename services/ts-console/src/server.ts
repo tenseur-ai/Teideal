@@ -24,6 +24,7 @@ import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
 import { registerStripeCustomerRoutes } from "./routes/stripeCustomers.js";
 import { stripeApiBaseUrl } from "./lib/stripeCustomers.js";
 import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
+import { registerSandboxRoutes } from "./routes/sandbox.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -53,6 +54,7 @@ export function buildServer() {
   registerExportRoutes(app, pool);
   registerStripeConnectRoutes(app, pool);
   registerStripeCustomerRoutes(app, pool);
+  registerSandboxRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);

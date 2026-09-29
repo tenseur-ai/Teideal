@@ -54,6 +54,7 @@ export interface ExchangedToken {
   accessToken: string;
   stripeAccountId: string;
   scope: StripeScope;
+  livemode: boolean;
 }
 
 export interface EncryptedToken {
@@ -243,7 +244,13 @@ export async function exchangeCode(code: string): Promise<ExchangedToken> {
     }),
   });
   const { ok, payload } = await readResponse(response);
-  const body = payload as { error?: unknown; access_token?: unknown; stripe_user_id?: unknown; scope?: unknown } | null;
+  const body = payload as {
+    error?: unknown;
+    access_token?: unknown;
+    stripe_user_id?: unknown;
+    scope?: unknown;
+    livemode?: unknown;
+  } | null;
   if (!ok) {
     const message = body && typeof body.error === "string" ? body.error : "stripe token exchange failed";
     throw new StripeOAuthError(message);
@@ -257,7 +264,15 @@ export async function exchangeCode(code: string): Promise<ExchangedToken> {
   if (body.scope !== "read_only" && body.scope !== "read_write") {
     throw new StripeOAuthError("stripe token exchange returned an unsupported scope");
   }
-  return { accessToken: body.access_token, stripeAccountId: body.stripe_user_id, scope: body.scope };
+  if (typeof body.livemode !== "boolean") {
+    throw new StripeOAuthError("stripe token exchange returned no livemode flag");
+  }
+  return {
+    accessToken: body.access_token,
+    stripeAccountId: body.stripe_user_id,
+    scope: body.scope,
+    livemode: body.livemode,
+  };
 }
 
 export async function deauthorize(stripeAccountId: string): Promise<void> {

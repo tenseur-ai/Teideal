@@ -9,6 +9,7 @@ interface IssuedCode {
   scope: string;
   stripeUserId: string;
   accessToken: string;
+  livemode: boolean;
 }
 
 interface StripeCustomerRecord {
@@ -176,6 +177,7 @@ const server = createServer(async (req, res) => {
           scope,
           stripeUserId: `acct_${letters(16)}`,
           accessToken: `sk_test_fake_${letters(24)}`,
+          livemode: url.searchParams.get("livemode") === "true",
         };
         pending.set(code, issued);
         const redirect = new URL(redirectUri);
@@ -207,7 +209,7 @@ const server = createServer(async (req, res) => {
           access_token: issued.accessToken,
           stripe_user_id: issued.stripeUserId,
           scope: issued.scope,
-          livemode: false,
+          livemode: issued.livemode,
           token_type: "bearer",
         });
       }
