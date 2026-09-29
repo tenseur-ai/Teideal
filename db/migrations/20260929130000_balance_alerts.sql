@@ -57,6 +57,11 @@ DROP POLICY IF EXISTS tenant_isolation_billing_alert_sent ON billing_alert_sent;
 CREATE POLICY tenant_isolation_billing_alert_sent ON billing_alert_sent
   USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
-GRANT SELECT, INSERT ON billing_alert_sent TO teideal_app;
+-- UPDATE is needed too: a claimed row's delivery_status is written once
+-- via INSERT (a SKIPPED placeholder, or the final value for a no-channel
+-- row) and then updated once, after delivery actually completes, for a
+-- row that had channels to attempt -- see claimSlots/updateDeliveryStatus
+-- in balanceAlertWorker.ts.
+GRANT SELECT, INSERT, UPDATE ON billing_alert_sent TO teideal_app;
 CREATE INDEX IF NOT EXISTS billing_alert_sent_grant_period_idx
   ON billing_alert_sent (tenant_id, grant_id, period_start);

@@ -35,3 +35,52 @@ Operator email calls the existing `sendEmail` stub, which keeps its own transact
 A failed channel is written to stderr as `balance_alert_delivery_failed` and returned by `GET /billing-alert-thresholds/delivery-failures` for Owner and Billing Admin. That is the endpoint the spec names. The ledger on-call webhook stays with go-usage.
 
 There is no grant-balance reversal API. TEID-47-T7 moves `remaining_amount` down and back up, which is the balance the evaluator reads, and runs a tick after each move.
+
+## Architect follow-up (2026-09-29): a real duplicate-delivery race, not caught by the catalog
+
+Independent verification found a genuine concurrency bug in the original
+`deliver()`-then-`insertNew()` ordering above: `evaluateTenant` read
+`existing` keys, called `deliver()` for every candidate not yet in that
+set (real email/Slack sends), and only inserted the dedup row
+*afterward*. Two overlapping evaluation ticks (a slow tick overlapping
+the next scheduled one -- realistic even in one process, since a real
+tick against a non-trivial database can run well past the default 60s
+interval with no reentrancy guard on the `setInterval`; near-guaranteed
+under multiple ts-console replicas with no distributed lock) both pass
+the read step before either commits its insert, so both independently
+deliver. The `UNIQUE (tenant_id, grant_id, threshold_pct, period_start)`
+constraint then correctly leaves only one *row*, but by then the
+duplicate *send* has already happened -- directly against AC2 ("fires
+only once per period"). Reproduced directly: 5 truly-concurrent
+`evaluateBalanceAlerts()` calls against one candidate delivered the same
+Slack alert 5 times before the fix, despite `billing_alert_sent` ending
+up with exactly 1 row throughout.
+
+None of the 8 cataloged tests exercise true concurrent worker execution
+-- T2/T6/T7 all re-run the evaluator sequentially, and T5's "simultaneous
+customers" tests one call over 10,000 pre-seeded rows, matching the
+spec's own guidance. So this gap could not have been caught by the
+catalog as written.
+
+Fixed by reversing the order: `claimSlots` now atomically claims each
+candidate's dedup slot via `INSERT ... ON CONFLICT DO NOTHING RETURNING`
+*before* any delivery is attempted, with a placeholder `SKIPPED` status.
+Only the tick that wins the unique-constraint race for a given key ever
+calls `deliver()`; a losing tick does nothing further for that
+candidate. `updateDeliveryStatus` then overwrites the winning row's
+`delivery_status` with the real outcome once delivery completes (a
+no-channel row's placeholder status is already its final value, so it
+needs no follow-up write). This also simplified the code -- the old
+`insertNew`/`insertKnownDuplicates`/`withSavepoint` chunked-retry dance
+existed only to recover from a 23505 raised by the old delivery-first
+insert; `ON CONFLICT DO NOTHING` makes that recovery path unnecessary,
+since a lost claim is a normal, expected outcome rather than an error to
+catch. `billing_alert_sent`'s grant was widened from `SELECT, INSERT` to
+`SELECT, INSERT, UPDATE`, needed for the new follow-up write.
+
+Reverified: the direct 5-concurrent-tick reproduction above now delivers
+exactly once (1 row, 1 real Slack request); all 8 cataloged tests still
+pass unchanged (their line numbers in the PR description remain
+accurate); full regression suite re-run clean (cross-tenant 75/75,
+console-auth 13/13, api-keys 9/9, rbac 8/8, grants 9/9, plans 9/9,
+commits 12/12, audit-log 7/7); `tsc --noEmit` clean.

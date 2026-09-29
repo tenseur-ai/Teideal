@@ -91,10 +91,6 @@ export function balanceAlertIntervalMs(): number {
   return parsed;
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: string }).code === "23505";
-}
-
 function asDate(value: Date | string): Date {
   return value instanceof Date ? value : new Date(value);
 }
@@ -387,79 +383,55 @@ async function deliver(pool: Pool, tenantId: string, candidate: Candidate, now: 
   return status;
 }
 
-async function insertRows(client: PoolClient, rows: SentInsert[]): Promise<void> {
+// Claims each candidate's dedup slot atomically via INSERT ... ON CONFLICT
+// DO NOTHING, BEFORE any delivery is attempted -- this is what actually
+// prevents two overlapping evaluation ticks (a slow tick overlapping the
+// next scheduled one, or multiple ts-console replicas with no distributed
+// lock) from both sending the same real alert. The UNIQUE constraint alone
+// only dedupes the *recorded row*; if delivery happened first and the claim
+// second (as an earlier version of this function did), two ticks that both
+// read "not yet sent" before either commits its insert both independently
+// deliver, and only one row survives -- correct bookkeeping, duplicate
+// alerts. Every claimed row starts with a placeholder SKIPPED status;
+// updateDeliveryStatus overwrites it with the real outcome once (and only
+// once) the winning tick actually attempts delivery.
+async function claimSlots(client: PoolClient, rows: SentInsert[]): Promise<Set<string>> {
+  const won = new Set<string>();
+  for (let offset = 0; offset < rows.length; offset += INSERT_CHUNK) {
+    const chunk = rows.slice(offset, offset + INSERT_CHUNK);
+    const { rows: returned } = await client.query<{ grant_id: string; threshold_pct: number; period_start: string }>(
+      `INSERT INTO billing_alert_sent
+         (tenant_id, customer_id, grant_id, threshold_pct, period_start, delivery_status)
+       SELECT t, c, g, p, d, s::jsonb
+       FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::smallint[], $5::date[], $6::text[])
+         AS x(t, c, g, p, d, s)
+       ON CONFLICT (tenant_id, grant_id, threshold_pct, period_start) DO NOTHING
+       RETURNING grant_id::text AS grant_id, threshold_pct::int AS threshold_pct, period_start::text AS period_start`,
+      [
+        chunk.map((row) => row.tenantId),
+        chunk.map((row) => row.customerId),
+        chunk.map((row) => row.grantId),
+        chunk.map((row) => row.thresholdPct),
+        chunk.map((row) => row.periodStart),
+        chunk.map((row) => JSON.stringify(row.deliveryStatus)),
+      ],
+    );
+    for (const row of returned) won.add(dedupKey(row.grant_id, row.threshold_pct, row.period_start));
+  }
+  return won;
+}
+
+async function updateDeliveryStatus(
+  client: PoolClient,
+  tenantId: string,
+  key: { grantId: string; thresholdPct: number; periodStart: string },
+  status: DeliveryStatus,
+): Promise<void> {
   await client.query(
-    `INSERT INTO billing_alert_sent
-       (tenant_id, customer_id, grant_id, threshold_pct, period_start, delivery_status)
-     SELECT t, c, g, p, d, s::jsonb
-     FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::smallint[], $5::date[], $6::text[])
-       AS x(t, c, g, p, d, s)`,
-    [
-      rows.map((row) => row.tenantId),
-      rows.map((row) => row.customerId),
-      rows.map((row) => row.grantId),
-      rows.map((row) => row.thresholdPct),
-      rows.map((row) => row.periodStart),
-      rows.map((row) => JSON.stringify(row.deliveryStatus)),
-    ],
+    `UPDATE billing_alert_sent SET delivery_status = $1::jsonb
+     WHERE tenant_id = $2 AND grant_id = $3 AND threshold_pct = $4 AND period_start = $5`,
+    [JSON.stringify(status), tenantId, key.grantId, key.thresholdPct, key.periodStart],
   );
-}
-
-async function withSavepoint<T>(client: PoolClient, name: string, fn: () => Promise<T>): Promise<T> {
-  await client.query(`SAVEPOINT ${name}`);
-  try {
-    const result = await fn();
-    await client.query(`RELEASE SAVEPOINT ${name}`);
-    return result;
-  } catch (error) {
-    await client.query(`ROLLBACK TO SAVEPOINT ${name}`);
-    await client.query(`RELEASE SAVEPOINT ${name}`);
-    throw error;
-  }
-}
-
-async function insertNew(client: PoolClient, rows: SentInsert[]): Promise<number> {
-  let conflicts = 0;
-  for (let offset = 0; offset < rows.length; offset += INSERT_CHUNK) {
-    const chunk = rows.slice(offset, offset + INSERT_CHUNK);
-    try {
-      await withSavepoint(client, "balance_alert_new", () => insertRows(client, chunk));
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      for (const row of chunk) {
-        try {
-          await withSavepoint(client, "balance_alert_one", () => insertRows(client, [row]));
-        } catch (inner) {
-          if (!isUniqueViolation(inner)) throw inner;
-          conflicts += 1;
-        }
-      }
-    }
-  }
-  return conflicts;
-}
-
-// Known duplicates are inserted again so the unique constraint, not a
-// skipped write, is what suppresses a second alert. One statement is enough:
-// PostgreSQL aborts the whole insert on the first 23505, and none of these
-// rows are new. Delivery is not repeated.
-async function insertKnownDuplicates(client: PoolClient, rows: SentInsert[]): Promise<number> {
-  if (rows.length === 0) return 0;
-  let conflicts = 0;
-  for (let offset = 0; offset < rows.length; offset += INSERT_CHUNK) {
-    const chunk = rows.slice(offset, offset + INSERT_CHUNK);
-    try {
-      await withSavepoint(client, "balance_alert_dup", () => insertRows(client, chunk));
-      console.error(JSON.stringify({
-        event: "balance_alert_duplicate_insert_unexpectedly_succeeded",
-        count: chunk.length,
-      }));
-    } catch (error) {
-      if (!isUniqueViolation(error)) throw error;
-      conflicts += chunk.length;
-    }
-  }
-  return conflicts;
 }
 
 async function evaluateTenant(pool: Pool, tenantId: string, now: Date): Promise<BalanceAlertEvaluation> {
@@ -470,23 +442,27 @@ async function evaluateTenant(pool: Pool, tenantId: string, now: Date): Promise<
     return { rows, existing };
   });
 
+  // This is a fast-path filter only, not the dedup authority -- a
+  // concurrent tick can still see the same key as "fresh" here. claimSlots
+  // below is what actually decides, atomically, which tick (if any) gets to
+  // deliver.
   const fresh = loaded.rows.filter((row) => !loaded.existing.has(dedupKey(row.grantId, row.thresholdPct, row.periodStart)));
-  const duplicates = loaded.rows.filter((row) => loaded.existing.has(dedupKey(row.grantId, row.thresholdPct, row.periodStart)));
-  const toDeliver = fresh.filter(hasChannels);
-  const noChannel = fresh.filter((row) => !hasChannels(row));
+  const preexistingDuplicates = loaded.rows.length - fresh.length;
 
-  const delivered: SentInsert[] = [];
-  for (const candidate of toDeliver) {
-    const deliveryStatus = await deliver(pool, tenantId, candidate, now);
-    delivered.push({
-      tenantId,
-      customerId: candidate.customerId,
-      grantId: candidate.grantId,
-      thresholdPct: candidate.thresholdPct,
-      periodStart: candidate.periodStart,
-      deliveryStatus,
-    });
-  }
+  const placeholders: SentInsert[] = fresh.map((row) => ({
+    tenantId,
+    customerId: row.customerId,
+    grantId: row.grantId,
+    thresholdPct: row.thresholdPct,
+    periodStart: row.periodStart,
+    deliveryStatus: SKIPPED,
+  }));
+  const wonKeys = await withTenant(pool, tenantId, (client) => claimSlots(client, placeholders));
+  const won = fresh.filter((row) => wonKeys.has(dedupKey(row.grantId, row.thresholdPct, row.periodStart)));
+  const lostClaim = fresh.length - won.length;
+
+  const toDeliver = won.filter(hasChannels);
+  const noChannel = won.filter((row) => !hasChannels(row));
 
   if (noChannel.length > 0) {
     console.info(JSON.stringify({
@@ -504,31 +480,18 @@ async function evaluateTenant(pool: Pool, tenantId: string, now: Date): Promise<
     }));
   }
 
-  const silent: SentInsert[] = noChannel.map((row) => ({
-    tenantId,
-    customerId: row.customerId,
-    grantId: row.grantId,
-    thresholdPct: row.thresholdPct,
-    periodStart: row.periodStart,
-    deliveryStatus: SKIPPED,
-  }));
-  const duplicateInserts: SentInsert[] = duplicates.map((row) => ({
-    tenantId,
-    customerId: row.customerId,
-    grantId: row.grantId,
-    thresholdPct: row.thresholdPct,
-    periodStart: row.periodStart,
-    deliveryStatus: SKIPPED,
-  }));
+  // noChannel rows already carry their final (SKIPPED) status from the
+  // claim insert -- only toDeliver's rows need a follow-up UPDATE once
+  // delivery actually completes.
+  for (const candidate of toDeliver) {
+    const deliveryStatus = await deliver(pool, tenantId, candidate, now);
+    await withTenant(pool, tenantId, (client) => updateDeliveryStatus(client, tenantId, candidate, deliveryStatus));
+  }
 
-  return withTenant(pool, tenantId, async (client) => {
-    const newConflicts = await insertNew(client, [...delivered, ...silent]);
-    const duplicateConflicts = await insertKnownDuplicates(client, duplicateInserts);
-    return {
-      recorded: delivered.length + silent.length - newConflicts,
-      uniqueConflicts: newConflicts + duplicateConflicts,
-    };
-  });
+  return {
+    recorded: won.length,
+    uniqueConflicts: preexistingDuplicates + lostClaim,
+  };
 }
 
 export async function evaluateBalanceAlerts(pool: Pool, now = new Date()): Promise<BalanceAlertEvaluation> {
