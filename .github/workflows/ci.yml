@@ -100,6 +100,7 @@ jobs:
             GOOGLE_JWKS_URL="$FAKE_GOOGLE_URL/jwks" GOOGLE_ISSUER="$FAKE_GOOGLE_URL" GOOGLE_AUDIENCE="teideal-console-test" \
             GOOGLE_JWKS_CACHE_MAX_AGE_MS=0 \
             STRIPE_CONNECT_BASE_URL="$FAKE_STRIPE_URL" \
+            STRIPE_API_BASE_URL="$FAKE_STRIPE_URL" \
             STRIPE_CONNECT_CLIENT_ID=ca_test_teideal \
             STRIPE_CONNECT_CLIENT_SECRET=sk_test_teideal_connect_secret \
             STRIPE_CONNECT_REDIRECT_URI=http://127.0.0.1:8081/stripe/connect/oauth/return \
@@ -183,7 +184,7 @@ jobs:
         working-directory: tests/stripe-connect
         run: npm ci
 
-      - name: Run TEID-37 acceptance suite (Stripe Connect read-only OAuth, scope upgrade, disconnect, adversarial code replay)
+      - name: Run TEID-37/TEID-38 acceptance suite (Stripe Connect OAuth and customer sync)
         working-directory: tests/stripe-connect
         run: npx vitest run
 

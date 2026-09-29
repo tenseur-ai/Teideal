@@ -11,6 +11,17 @@ interface IssuedCode {
   accessToken: string;
 }
 
+interface StripeCustomerRecord {
+  name: string | null;
+  email: string | null;
+}
+
+interface IssuedToken {
+  scope: string;
+  stripeUserId: string;
+  stripeCustomers: Map<string, StripeCustomerRecord>;
+}
+
 interface LoggedExchange {
   method: string;
   path: string;
@@ -22,6 +33,7 @@ interface LoggedExchange {
 
 const pending = new Map<string, IssuedCode>();
 const consumed = new Set<string>();
+const issuedTokens = new Map<string, IssuedToken>();
 const requests: LoggedExchange[] = [];
 
 function letters(count: number): string {
@@ -44,6 +56,59 @@ function finish(res: ServerResponse, status: number, body: string, contentType: 
   res.end(body);
 }
 
+function bearerToken(req: IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (typeof header !== "string" || !header.startsWith("Bearer ") || header.length <= "Bearer ".length) {
+    return null;
+  }
+  return header.slice("Bearer ".length).trim();
+}
+
+function lookupIssued(req: IncomingMessage): IssuedToken | null {
+  const token = bearerToken(req);
+  if (!token) return null;
+  return issuedTokens.get(token) ?? null;
+}
+
+function parseCustomerFields(requestBody: string, contentType: string): { name: string | null; email: string | null } {
+  if (contentType.includes("application/json")) {
+    try {
+      const json = JSON.parse(requestBody) as { name?: unknown; email?: unknown };
+      return {
+        name: typeof json.name === "string" ? json.name : null,
+        email: typeof json.email === "string" ? json.email : null,
+      };
+    } catch {
+      return { name: null, email: null };
+    }
+  }
+  const params = new URLSearchParams(requestBody);
+  return { name: params.get("name"), email: params.get("email") };
+}
+
+function listCustomers(
+  issued: IssuedToken,
+  email: string | null,
+  startingAfter: string | null,
+  limit: number,
+): { data: Array<{ id: string; object: string; name: string | null; email: string | null }>; has_more: boolean } {
+  let rows = [...issued.stripeCustomers.entries()].map(([id, record]) => ({
+    id,
+    object: "customer",
+    name: record.name,
+    email: record.email,
+  }));
+  if (email !== null) rows = rows.filter((row) => row.email === email);
+  if (startingAfter) {
+    const index = rows.findIndex((row) => row.id === startingAfter);
+    rows = index >= 0 ? rows.slice(index + 1) : [];
+  }
+  return {
+    data: rows.slice(0, limit),
+    has_more: rows.length > limit,
+  };
+}
+
 const port = Number(process.env.FAKE_STRIPE_PORT ?? 8092);
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
@@ -57,6 +122,40 @@ const server = createServer(async (req, res) => {
     // the captured body contain the log.
     if (req.method === "GET" && path === "/_requests") {
       finish(res, 200, JSON.stringify({ requests }), "application/json");
+      return;
+    }
+    if (req.method === "POST" && path === "/_seed/customers") {
+      const requestBody = await readBody(req);
+      let payload: { access_token?: unknown; customers?: unknown } = {};
+      try {
+        payload = JSON.parse(requestBody) as { access_token?: unknown; customers?: unknown };
+      } catch {
+        finish(res, 400, JSON.stringify({ error: "invalid json" }), "application/json");
+        return;
+      }
+      if (typeof payload.access_token !== "string" || !issuedTokens.has(payload.access_token)) {
+        finish(res, 400, JSON.stringify({ error: "unknown access_token" }), "application/json");
+        return;
+      }
+      if (!Array.isArray(payload.customers)) {
+        finish(res, 400, JSON.stringify({ error: "customers must be an array" }), "application/json");
+        return;
+      }
+      const issued = issuedTokens.get(payload.access_token)!;
+      const seeded: string[] = [];
+      for (const row of payload.customers) {
+        if (typeof row !== "object" || row === null) continue;
+        const record = row as { id?: unknown; name?: unknown; email?: unknown };
+        const id = typeof record.id === "string" && record.id.length > 0
+          ? record.id
+          : `cus_seed_${letters(14)}`;
+        issued.stripeCustomers.set(id, {
+          name: typeof record.name === "string" ? record.name : null,
+          email: typeof record.email === "string" ? record.email : null,
+        });
+        seeded.push(id);
+      }
+      finish(res, 200, JSON.stringify({ seeded: seeded.length, ids: seeded }), "application/json");
       return;
     }
 
@@ -98,6 +197,11 @@ const server = createServer(async (req, res) => {
         const issued = pending.get(code)!;
         pending.delete(code);
         consumed.add(code);
+        issuedTokens.set(issued.accessToken, {
+          scope: issued.scope,
+          stripeUserId: issued.stripeUserId,
+          stripeCustomers: new Map(),
+        });
         responseStatus = 200;
         responseBody = JSON.stringify({
           access_token: issued.accessToken,
@@ -105,6 +209,50 @@ const server = createServer(async (req, res) => {
           scope: issued.scope,
           livemode: false,
           token_type: "bearer",
+        });
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "GET" && path === "/v1/customers") {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else {
+        const limitRaw = Number(url.searchParams.get("limit") ?? 100);
+        const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 100;
+        const listed = listCustomers(
+          issued,
+          url.searchParams.get("email"),
+          url.searchParams.get("starting_after"),
+          limit,
+        );
+        responseStatus = 200;
+        responseBody = JSON.stringify({
+          object: "list",
+          url: "/v1/customers",
+          has_more: listed.has_more,
+          data: listed.data,
+        });
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "POST" && path === "/v1/customers") {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else if (issued.scope === "read_only") {
+        responseStatus = 403;
+        responseBody = JSON.stringify({ error: "read_only" });
+      } else {
+        const fields = parseCustomerFields(requestBody, String(req.headers["content-type"] ?? ""));
+        const id = `cus_${letters(14)}`;
+        issued.stripeCustomers.set(id, { name: fields.name, email: fields.email });
+        responseStatus = 200;
+        responseBody = JSON.stringify({
+          id,
+          object: "customer",
+          name: fields.name,
+          email: fields.email,
         });
       }
       finish(res, responseStatus, responseBody, "application/json");

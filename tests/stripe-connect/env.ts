@@ -17,6 +17,7 @@ export const STRIPE_TOKEN_ENCRYPTION_KEY = prefer(
   "02DWhpwMvIIHYMC/Z73W+qfHPlGd/gBN3riv9zqXQmY=",
 );
 prefer("STRIPE_CONNECT_BASE_URL", FAKE_STRIPE_URL);
+prefer("STRIPE_API_BASE_URL", FAKE_STRIPE_URL);
 prefer("STRIPE_CONNECT_CLIENT_ID", "ca_test_teideal");
 prefer("STRIPE_CONNECT_CLIENT_SECRET", "sk_test_teideal_connect_secret");
 prefer("STRIPE_CONNECT_REDIRECT_URI", "http://127.0.0.1:8081/stripe/connect/oauth/return");
