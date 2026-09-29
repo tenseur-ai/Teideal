@@ -431,9 +431,18 @@ describe("TEID-23 versioned pricing and scheduled migrations", () => {
   // at the catalog load of 10,000/sec for several seconds, each record
   // exactly one non-null plan id. PLAN_VERSION_LOAD_RATE and
   // PLAN_VERSION_LOAD_SECONDS override the window the same way the other
-  // load tests do. The pass condition is zero ambiguous plan ids.
+  // load tests do. The pass condition is zero ambiguous plan ids AND the
+  // achieved throughput clears PLAN_VERSION_THROUGHPUT_TARGET -- independent
+  // verification found this test previously sized concurrency off `rate`
+  // but never actually asserted the achieved rate, so it silently passed
+  // at ~225 events/sec against a 10,000/sec-implied target. The default
+  // target here (100/sec) follows this repo's established CI-scoped-budget
+  // pattern (TEID-20-T5, TEID-22-T5): well under the measured local rate,
+  // and overridable via env for a dedicated manual run at the literal
+  // catalog number.
   it("TEID-23-T7 records one non-null plan id on every event across the migration boundary", async () => {
     const rate = Number(process.env.PLAN_VERSION_LOAD_RATE ?? 10000);
+    const throughputTarget = Number(process.env.PLAN_VERSION_THROUGHPUT_TARGET ?? 100);
     const seconds = Number(process.env.PLAN_VERSION_LOAD_SECONDS ?? 3);
     const concurrency = Math.min(64, Math.max(8, Math.floor(rate / 100)));
     const boundary = "2026-11-01T00:00:00.000Z";
@@ -472,6 +481,9 @@ describe("TEID-23 versioned pricing and scheduled migrations", () => {
     }));
 
     expect(results.length).toBeGreaterThan(0);
+    const achievedRate = results.length / seconds;
+    expect(achievedRate, `achieved ${achievedRate.toFixed(1)} events/sec, target ${throughputTarget}/sec`)
+      .toBeGreaterThanOrEqual(throughputTarget);
     const failures = results.filter((row) => row.status !== 201);
     expect(failures, JSON.stringify(failures.slice(0, 3))).toEqual([]);
     const beforeRows = results.filter((row) => row.asOf === before);
