@@ -10,15 +10,21 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/shopspring/decimal"
 
 	"teideal/go-usage/internal/auth"
+	"teideal/go-usage/internal/money"
 )
 
 type billingConfig struct {
-	CustomerID       string `json:"customer_id"`
-	BillingTimezone  string `json:"billing_timezone"`
-	BillingAnchorDay int    `json:"billing_anchor_day"`
+	CustomerID                    string           `json:"customer_id"`
+	BillingTimezone               string           `json:"billing_timezone"`
+	BillingAnchorDay              int              `json:"billing_anchor_day"`
+	AutoApproveAdjustmentThreshold *decimal.Decimal `json:"auto_approve_adjustment_threshold"`
 }
+
+var maxAutoApproveAdjustmentThreshold = decimal.NewFromInt(1_000_000)
 
 func (h *Handlers) effectiveBillingConfig(ctx context.Context, tenantID, customerID string) (billingConfig, bool, error) {
 	config := billingConfig{
@@ -35,15 +41,26 @@ func (h *Handlers) effectiveBillingConfig(ctx context.Context, tenantID, custome
 			return nil
 		}
 
+		var threshold pgtype.Numeric
 		err := tx.QueryRow(ctx, `
-			SELECT billing_timezone, billing_anchor_day
+			SELECT billing_timezone, billing_anchor_day, auto_approve_adjustment_threshold
 			FROM customer_billing_config
 			WHERE customer_id = $1
-		`, customerID).Scan(&config.BillingTimezone, &config.BillingAnchorDay)
+		`, customerID).Scan(&config.BillingTimezone, &config.BillingAnchorDay, &threshold)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if threshold.Valid {
+			value, err := money.FromPGNumeric(threshold)
+			if err != nil {
+				return err
+			}
+			config.AutoApproveAdjustmentThreshold = &value
+		}
+		return nil
 	})
 	return config, customerExists, err
 }
@@ -78,8 +95,9 @@ func (h *Handlers) GetBillingConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 type putBillingConfigRequest struct {
-	BillingTimezone  *string `json:"billing_timezone"`
-	BillingAnchorDay *int    `json:"billing_anchor_day"`
+	BillingTimezone                *string          `json:"billing_timezone"`
+	BillingAnchorDay               *int             `json:"billing_anchor_day"`
+	AutoApproveAdjustmentThreshold *decimal.Decimal `json:"auto_approve_adjustment_threshold"`
 }
 
 // PutBillingConfig handles PUT /customers/:id/billing-config. Omitted fields
@@ -112,6 +130,20 @@ func (h *Handlers) PutBillingConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "billing_anchor_day must be between 1 and 31")
 		return
 	}
+	if req.AutoApproveAdjustmentThreshold != nil &&
+		(req.AutoApproveAdjustmentThreshold.IsNegative() || req.AutoApproveAdjustmentThreshold.GreaterThan(maxAutoApproveAdjustmentThreshold)) {
+		writeErr(w, http.StatusBadRequest, "auto_approve_adjustment_threshold must be between 0 and 1000000")
+		return
+	}
+	var threshold any
+	if req.AutoApproveAdjustmentThreshold != nil {
+		value, err := money.ToPGNumeric(*req.AutoApproveAdjustmentThreshold)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "auto_approve_adjustment_threshold must be between 0 and 1000000")
+			return
+		}
+		threshold = value
+	}
 
 	saved := billingConfig{CustomerID: customerID}
 	var customerExists bool
@@ -123,19 +155,33 @@ func (h *Handlers) PutBillingConfig(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		return tx.QueryRow(ctx, `
+		var savedThreshold pgtype.Numeric
+		err := tx.QueryRow(ctx, `
 			INSERT INTO customer_billing_config (
-				tenant_id, customer_id, billing_timezone, billing_anchor_day
+				tenant_id, customer_id, billing_timezone, billing_anchor_day,
+				auto_approve_adjustment_threshold
 			)
-			VALUES ($1, $2, COALESCE($3::text, 'UTC'), COALESCE($4::int, 1))
+			VALUES ($1, $2, COALESCE($3::text, 'UTC'), COALESCE($4::int, 1), $5::numeric)
 			ON CONFLICT (customer_id)
 			DO UPDATE SET
 				billing_timezone = COALESCE($3::text, customer_billing_config.billing_timezone),
 				billing_anchor_day = COALESCE($4::int, customer_billing_config.billing_anchor_day),
+				auto_approve_adjustment_threshold = COALESCE($5::numeric, customer_billing_config.auto_approve_adjustment_threshold),
 				updated_at = now()
-			RETURNING billing_timezone, billing_anchor_day
-		`, principal.TenantID, customerID, req.BillingTimezone, req.BillingAnchorDay).
-			Scan(&saved.BillingTimezone, &saved.BillingAnchorDay)
+			RETURNING billing_timezone, billing_anchor_day, auto_approve_adjustment_threshold
+		`, principal.TenantID, customerID, req.BillingTimezone, req.BillingAnchorDay, threshold).
+			Scan(&saved.BillingTimezone, &saved.BillingAnchorDay, &savedThreshold)
+		if err != nil {
+			return err
+		}
+		if savedThreshold.Valid {
+			value, err := money.FromPGNumeric(savedThreshold)
+			if err != nil {
+				return err
+			}
+			saved.AutoApproveAdjustmentThreshold = &value
+		}
+		return nil
 	})
 	if err != nil {
 		log.Printf("PutBillingConfig: %v", err)

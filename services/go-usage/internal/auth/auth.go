@@ -17,6 +17,7 @@ type Principal struct {
 	TenantID  string
 	TenantKey string // e.g. "acct_1001", for logging/tests only
 	Scope     string
+	UserID    *string // creator of the API key, when the key is user-attributed
 }
 
 var ErrNoKey = errors.New("auth: missing or malformed authorization header")
@@ -34,7 +35,7 @@ func hashKey(plaintext string) string {
 // exactly what this call produces.
 func Resolve(ctx context.Context, pool *pgxpool.Pool, plaintextKey string) (Principal, error) {
 	row := pool.QueryRow(ctx, `
-		SELECT k.id, t.id, t.external_key, k.scope
+		SELECT k.id, t.id, t.external_key, k.scope, k.creator_user_id
 		FROM api_keys k
 		JOIN tenants t ON t.id = k.issued_to_tenant_id
 		WHERE k.key_hash = $1
@@ -44,7 +45,7 @@ func Resolve(ctx context.Context, pool *pgxpool.Pool, plaintextKey string) (Prin
 
 	var p Principal
 	var apiKeyID string
-	if err := row.Scan(&apiKeyID, &p.TenantID, &p.TenantKey, &p.Scope); err != nil {
+	if err := row.Scan(&apiKeyID, &p.TenantID, &p.TenantKey, &p.Scope, &p.UserID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Principal{}, ErrUnknownKey
 		}

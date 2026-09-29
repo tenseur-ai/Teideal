@@ -62,6 +62,9 @@ func main() {
 	mux.Handle("GET /ledger/transactions/{id}", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetLedgerTransaction)))
 	mux.Handle("POST /customers/{id}/recalculate-balance", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostRecalculateCustomerBalance)))
 	mux.Handle("GET /balance-integrity/checks", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetBalanceIntegrityChecks)))
+	mux.Handle("GET /adjustments", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetAdjustments)))
+	mux.Handle("POST /adjustments/{id}/approve", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostApproveAdjustment)))
+	mux.Handle("POST /adjustments/{id}/reject", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostRejectAdjustment)))
 
 	if os.Getenv("DISABLE_BACKGROUND_WORKERS") != "true" {
 		interval := 24 * time.Hour

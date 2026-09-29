@@ -21,6 +21,7 @@ import (
 	"teideal/go-usage/internal/auth"
 	"teideal/go-usage/internal/db"
 	"teideal/go-usage/internal/money"
+	billingperiod "teideal/go-usage/internal/period"
 	"teideal/go-usage/internal/security"
 )
 
@@ -35,6 +36,7 @@ type usageEvent struct {
 	Quantity       decimal.Decimal `json:"quantity"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	OccurredAt     time.Time       `json:"occurred_at"`
+	IsPriorPeriodAdjustment bool   `json:"is_prior_period_adjustment"`
 }
 
 var eventTypeRegex = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
@@ -93,16 +95,27 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		customerFilter = &raw
 	}
+	var priorPeriodAdjustmentFilter *bool
+	if raw, present := r.URL.Query()["prior_period_adjustments"]; present {
+		if len(raw) != 1 || (raw[0] != "true" && raw[0] != "false") {
+			writeErr(w, http.StatusBadRequest, "prior_period_adjustments must be true or false")
+			return
+		}
+		value := raw[0] == "true"
+		priorPeriodAdjustmentFilter = &value
+	}
 
 	events := []usageEvent{}
 	err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT id, customer_id, event_type, quantity, idempotency_key, occurred_at
+			SELECT id, customer_id, event_type, quantity, idempotency_key, occurred_at,
+			       is_prior_period_adjustment
 			FROM usage_events
 			WHERE ($1::uuid IS NULL OR customer_id = $1)
+			  AND ($2::boolean IS NULL OR is_prior_period_adjustment = $2)
 			ORDER BY occurred_at DESC
 			LIMIT 200
-		`, customerFilter)
+		`, customerFilter, priorPeriodAdjustmentFilter)
 		if err != nil {
 			return err
 		}
@@ -110,7 +123,10 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var e usageEvent
 			var quantity pgtype.Numeric
-			if err := rows.Scan(&e.ID, &e.CustomerID, &e.EventType, &quantity, &e.IdempotencyKey, &e.OccurredAt); err != nil {
+			if err := rows.Scan(
+				&e.ID, &e.CustomerID, &e.EventType, &quantity, &e.IdempotencyKey,
+				&e.OccurredAt, &e.IsPriorPeriodAdjustment,
+			); err != nil {
 				return err
 			}
 			e.Quantity, err = money.FromPGNumeric(quantity)
@@ -155,6 +171,94 @@ type batchResultItem struct {
 	IdempotencyKey string           `json:"idempotency_key,omitempty"`
 	OccurredAt     *time.Time       `json:"occurred_at,omitempty"`
 	Reason         string           `json:"reason,omitempty"`
+	AdjustmentID   string           `json:"adjustment_id,omitempty"`
+}
+
+type usageWriteResult struct {
+	closed       bool
+	queued       bool
+	adjustmentID string
+}
+
+func writeUsage(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	request postUsageRequest,
+	quantity pgtype.Numeric,
+	now time.Time,
+	created *usageEvent,
+	createdQuantity *pgtype.Numeric,
+) (usageWriteResult, error) {
+	timezone := "UTC"
+	anchorDay := 1
+	var threshold pgtype.Numeric
+	err := tx.QueryRow(ctx, `
+		SELECT billing_timezone, billing_anchor_day, auto_approve_adjustment_threshold
+		FROM customer_billing_config
+		WHERE customer_id = $1
+	`, request.CustomerID).Scan(&timezone, &anchorDay, &threshold)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return usageWriteResult{}, err
+	}
+
+	occurredAt := now
+	if request.OccurredAt != nil {
+		occurredAt = *request.OccurredAt
+	}
+	periodStart, periodEnd, err := billingperiod.Boundaries(timezone, anchorDay, occurredAt)
+	if err != nil {
+		return usageWriteResult{}, err
+	}
+	if now.Before(periodEnd) {
+		return usageWriteResult{}, insertUsageEvent(
+			ctx, tx, tenantID, request.CustomerID, request.EventType, quantity,
+			request.IdempotencyKey, request.OccurredAt, created, createdQuantity,
+		)
+	}
+
+	result := usageWriteResult{closed: true}
+	autoApprove := false
+	if threshold.Valid {
+		thresholdValue, err := money.FromPGNumeric(threshold)
+		if err != nil {
+			return result, err
+		}
+		autoApprove = request.Quantity.LessThanOrEqual(thresholdValue)
+	}
+	status := "pending"
+	if autoApprove {
+		status = "approved"
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO usage_adjustments (
+			tenant_id, customer_id, event_type, quantity, idempotency_key,
+			occurred_at, period_start, period_end, status, auto_approved
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id
+	`, tenantID, request.CustomerID, request.EventType, quantity, request.IdempotencyKey,
+		occurredAt, periodStart, periodEnd, status, autoApprove).Scan(&result.adjustmentID)
+	if err != nil {
+		return result, err
+	}
+	if !autoApprove {
+		result.queued = true
+		return result, nil
+	}
+
+	if err := insertPriorPeriodUsageEvent(
+		ctx, tx, tenantID, request.CustomerID, request.EventType, quantity,
+		request.IdempotencyKey, occurredAt, created, createdQuantity,
+	); err != nil {
+		return result, err
+	}
+	_, err = tx.Exec(ctx, `
+		UPDATE usage_adjustments
+		SET resulting_usage_event_id = $1
+		WHERE id = $2
+	`, created.ID, result.adjustmentID)
+	return result, err
 }
 
 // PostUsage handles POST /usage. tenant_id is always taken from the
@@ -242,6 +346,8 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 	var created usageEvent
 	var createdQuantity pgtype.Numeric
 	var customerNotVisible bool
+	var writeResult usageWriteResult
+	now := time.Now().UTC()
 	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var exists bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1)`, req.CustomerID).Scan(&exists); err != nil {
@@ -251,10 +357,11 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 			customerNotVisible = true
 			return nil
 		}
-		return insertUsageEvent(
-			ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
-			req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+		var writeErr error
+		writeResult, writeErr = writeUsage(
+			ctx, tx, principal.TenantID, req, quantity, now, &created, &createdQuantity,
 		)
+		return writeErr
 	})
 
 	// A 23505 aborts the transaction above, so classification/retry/conflict-
@@ -268,6 +375,28 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 	if !customerNotVisible && err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if writeResult.closed {
+				var adjustment existingAdjustment
+				err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+					var rerr error
+					resultOutcome, adjustment, rerr = resolveAdjustmentConflict(
+						ctx, tx, req.IdempotencyKey, req.CustomerID, req.EventType, req.Quantity,
+					)
+					return rerr
+				})
+				if err == nil {
+					writeResult.adjustmentID = adjustment.ID
+					writeResult.queued = adjustment.Status == "pending"
+					if adjustment.ResultingUsageEventID != nil {
+						existing.ID = *adjustment.ResultingUsageEventID
+					} else {
+						existing.ID = adjustment.ID
+					}
+					existing.CustomerID = adjustment.CustomerID
+					existing.EventType = adjustment.EventType
+					existing.Quantity = adjustment.Quantity
+				}
+			} else {
 			err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 				outcome, ex, rerr := resolveIdempotencyConflict(
 					ctx, tx, req.IdempotencyKey, req.CustomerID, req.EventType, req.Quantity, time.Now(),
@@ -292,6 +421,7 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 					return nil
 				}
 			})
+			}
 		}
 	}
 
@@ -326,6 +456,13 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error":       idempotencyConflictMessage,
 			"existing_id": existing.ID,
+		})
+		return
+	}
+	if writeResult.queued {
+		writeJSON(w, http.StatusAccepted, map[string]string{
+			"status":        "queued_for_review",
+			"adjustment_id": writeResult.adjustmentID,
 		})
 		return
 	}
@@ -413,9 +550,19 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			continue
 		}
 
+		itemRequest := postUsageRequest{
+			CustomerID:     *item.CustomerID,
+			EventType:      *item.EventType,
+			Quantity:       qty,
+			IdempotencyKey: *item.IdempotencyKey,
+			OccurredAt:     occurredAt,
+		}
+		now := time.Now().UTC()
+
 		var created usageEvent
 		var createdQuantity pgtype.Numeric
 		var customerNotVisible bool
+		var writeResult usageWriteResult
 		err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var exists bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customers WHERE id = $1)`, *item.CustomerID).Scan(&exists); err != nil {
@@ -425,43 +572,58 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 				customerNotVisible = true
 				return nil
 			}
-			return insertUsageEvent(
-				ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
-				*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+			var writeErr error
+			writeResult, writeErr = writeUsage(
+				ctx, tx, principal.TenantID, itemRequest, quantity, now, &created, &createdQuantity,
 			)
+			return writeErr
 		})
 
 		// Same second-transaction shape as postUsageSingle above -- see its
-		// comment. Only a 23505 ever pays this extra round trip.
+		// comment. Only a 23505 ever pays this extra round trip. A closed
+		// period's conflict is resolved against usage_adjustments, an open
+		// period's against usage_events -- the same branch postUsageSingle
+		// already makes.
 		resultOutcome := outcomeInserted
 		var existing existingEvent
+		var existingAdj existingAdjustment
 		if !customerNotVisible && err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-					outcome, ex, rerr := resolveIdempotencyConflict(
-						ctx, tx, *item.IdempotencyKey, *item.CustomerID, *item.EventType, qty, time.Now(),
-					)
-					if rerr != nil {
+				if writeResult.closed {
+					err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+						var rerr error
+						resultOutcome, existingAdj, rerr = resolveAdjustmentConflict(
+							ctx, tx, *item.IdempotencyKey, *item.CustomerID, *item.EventType, qty,
+						)
 						return rerr
-					}
-					resultOutcome = outcome
-					existing = ex
-					switch outcome {
-					case outcomeInserted:
-						return insertUsageEvent(
-							ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
-							*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+					})
+				} else {
+					err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+						outcome, ex, rerr := resolveIdempotencyConflict(
+							ctx, tx, *item.IdempotencyKey, *item.CustomerID, *item.EventType, qty, time.Now(),
 						)
-					case outcomeConflict:
-						return recordConflict(
-							ctx, tx, principal.TenantID, *item.IdempotencyKey, ex.ID,
-							*item.CustomerID, *item.EventType, qty,
-						)
-					default: // outcomeDuplicate
-						return nil
-					}
-				})
+						if rerr != nil {
+							return rerr
+						}
+						resultOutcome = outcome
+						existing = ex
+						switch outcome {
+						case outcomeInserted:
+							return insertUsageEvent(
+								ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
+								*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+							)
+						case outcomeConflict:
+							return recordConflict(
+								ctx, tx, principal.TenantID, *item.IdempotencyKey, ex.ID,
+								*item.CustomerID, *item.EventType, qty,
+							)
+						default: // outcomeDuplicate
+							return nil
+						}
+					})
+				}
 			}
 		}
 
@@ -483,7 +645,15 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			continue
 		}
 		if resultOutcome == outcomeDuplicate {
-			results[i] = batchResultItem{Status: "duplicate", ID: existing.ID}
+			if existingAdj.ID != "" {
+				id := existingAdj.ID
+				if existingAdj.ResultingUsageEventID != nil {
+					id = *existingAdj.ResultingUsageEventID
+				}
+				results[i] = batchResultItem{Status: "duplicate", ID: id}
+			} else {
+				results[i] = batchResultItem{Status: "duplicate", ID: existing.ID}
+			}
 			continue
 		}
 		if resultOutcome == outcomeConflict {
@@ -492,6 +662,10 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 				ID:     existing.ID,
 				Reason: idempotencyConflictMessage,
 			}
+			continue
+		}
+		if writeResult.queued {
+			results[i] = batchResultItem{Status: "queued_for_review", AdjustmentID: writeResult.adjustmentID}
 			continue
 		}
 		created.Quantity, err = money.FromPGNumeric(createdQuantity)
@@ -531,6 +705,43 @@ func parseOptionalExplicitTimestamp(raw json.RawMessage, field string) (*time.Ti
 	return &parsed, nil
 }
 
+type existingAdjustment struct {
+	ID                    string
+	CustomerID            string
+	EventType             string
+	Quantity              decimal.Decimal
+	Status                string
+	ResultingUsageEventID *string
+}
+
+func resolveAdjustmentConflict(
+	ctx context.Context,
+	tx pgx.Tx,
+	idempotencyKey string,
+	attemptedCustomerID string,
+	attemptedEventType string,
+	attemptedQuantity decimal.Decimal,
+) (idempotencyOutcome, existingAdjustment, error) {
+	var existing existingAdjustment
+	err := tx.QueryRow(ctx, `
+		SELECT id, customer_id, event_type, quantity, status, resulting_usage_event_id
+		FROM usage_adjustments
+		WHERE idempotency_key = $1
+	`, idempotencyKey).Scan(
+		&existing.ID, &existing.CustomerID, &existing.EventType, &existing.Quantity,
+		&existing.Status, &existing.ResultingUsageEventID,
+	)
+	if err != nil {
+		return outcomeConflict, existingAdjustment{}, err
+	}
+	if existing.CustomerID == attemptedCustomerID &&
+		existing.EventType == attemptedEventType &&
+		existing.Quantity.Equal(attemptedQuantity) {
+		return outcomeDuplicate, existing, nil
+	}
+	return outcomeConflict, existing, nil
+}
+
 func insertUsageEvent(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -558,6 +769,34 @@ func insertUsageEvent(
 		RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
 	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt).
 		Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+}
+
+func insertPriorPeriodUsageEvent(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID string,
+	customerID string,
+	eventType string,
+	quantity pgtype.Numeric,
+	idempotencyKey string,
+	occurredAt time.Time,
+	created *usageEvent,
+	createdQuantity *pgtype.Numeric,
+) error {
+	err := tx.QueryRow(ctx, `
+		INSERT INTO usage_events (
+			tenant_id, customer_id, event_type, quantity, idempotency_key,
+			occurred_at, is_prior_period_adjustment
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, true)
+		RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at,
+		          is_prior_period_adjustment
+	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt).
+		Scan(
+			&created.ID, &created.CustomerID, &created.EventType, createdQuantity,
+			&created.IdempotencyKey, &created.OccurredAt, &created.IsPriorPeriodAdjustment,
+		)
+	return err
 }
 
 type usageSummaryResponse struct {
