@@ -47,6 +47,39 @@ curl -X POST "$GO_USAGE_URL/ledger/transactions/$TRANSACTION_ID/reverse" -H "aut
 curl "$GO_USAGE_URL/ledger/transactions/$TRANSACTION_ID" -H "authorization: Bearer $API_KEY"
 ```
 
+## GET /customers/{id}/reservations [go-usage]
+
+- **Auth:** `read-only` or `admin` API key, or a console session.
+- **Request:** Customer UUID; optional `since`/`until`/`limit`/cursor.
+- **Response:** `200 {data:[{id,customer_id,usage_event_id,created_at}],next_cursor}`.
+- **Errors:** `400` invalid UUID/date range/cursor; `403` `customer_id` not visible to caller's tenant; `401/403` auth; `500` query failure.
+
+```bash
+curl "$GO_USAGE_URL/customers/$CUSTOMER_ID/reservations" -H "authorization: Bearer $API_KEY"
+```
+
+## GET /customers/{id}/ledger-transactions [go-usage]
+
+- **Auth:** `read-only` or `admin` API key, or a console session.
+- **Request:** Customer UUID; optional `since`/`until`/`limit`/cursor.
+- **Response:** `200 {data:[{id,customer_id,usage_event_id,grant_id,reservation_id,pricing_rule_id,plan_version,description,created_at}],next_cursor}`.
+- **Errors:** `400` invalid UUID/date range/cursor; `403` `customer_id` not visible to caller's tenant; `401/403` auth; `500` query failure.
+
+```bash
+curl "$GO_USAGE_URL/customers/$CUSTOMER_ID/ledger-transactions" -H "authorization: Bearer $API_KEY"
+```
+
+## GET /ledger/transactions/{id}/detail [go-usage]
+
+- **Auth:** `read-only` or `admin` API key, or a console session. Used by the [customer timeline](timeline.md)'s charge drill-down -- no `invoices` table exists yet, so a ledger transaction stands in for an invoice line.
+- **Request:** Ledger transaction UUID.
+- **Response:** `200` the transaction (with its `ledger_lines`) plus `usage_event` (the originating usage event, or `null`).
+- **Errors:** `400` invalid UUID; `403` transaction's customer not visible to caller's tenant (re-checked explicitly -- RLS alone cannot express `api_keys.customer_id` scoping); `404` missing transaction; `401/403` auth; `500` query failure.
+
+```bash
+curl "$GO_USAGE_URL/ledger/transactions/$TRANSACTION_ID/detail" -H "authorization: Bearer $API_KEY"
+```
+
 ## POST /customers/{id}/recalculate-balance [go-usage]
 
 - **Auth:** `admin` API key.
