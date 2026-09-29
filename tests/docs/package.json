@@ -1,0 +1,20 @@
+{
+  "name": "@teideal/docs-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-62 API coverage, executable examples, quick-start, accessibility, guarantees, and deprecation tests",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^22.10.2",
+    "axe-core": "^4.10.3",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

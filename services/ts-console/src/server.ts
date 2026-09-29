@@ -27,18 +27,29 @@ import { registerProcessorLookupRoutes } from "./routes/processorLookup.js";
 import { stripeApiBaseUrl } from "./lib/stripeCustomers.js";
 import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 import { registerSandboxRoutes } from "./routes/sandbox.js";
+import { rejectDeprecatedRoute } from "./lib/deprecatedRoutes.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
 const GRANT_WORKER_INTERVAL_MS = 60 * 1000;
 const COMMIT_DRAWDOWN_INTERVAL_MS = 60 * 1000;
 
-export function buildServer() {
+export interface BuildServerOptions {
+  onRoute?: (route: { method: string | string[]; url: string }) => void;
+}
+
+export function buildServer(options: BuildServerOptions = {}) {
   const app = Fastify({ logger: false });
   const pool = createPool(
     process.env.DATABASE_URL ?? "postgres://teideal_app:teideal_app_dev_password@localhost:5432/teideal",
   );
   const adminSecret = process.env.ADMIN_SECRET ?? "dev_admin_secret";
+
+  // Install both hooks before any routes. The first makes the actual runtime
+  // registration stream available to documentation coverage tooling; the
+  // second gives retired paths an actionable 410 before normal routing.
+  if (options.onRoute) app.addHook("onRoute", options.onRoute);
+  app.addHook("onRequest", rejectDeprecatedRoute);
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
