@@ -3,8 +3,10 @@ import type { FastifyInstance } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import { recordConfigChangeWithClient } from "../lib/audit.js";
 import { withTenant } from "../lib/db.js";
+import { customerVisible } from "../lib/grants.js";
 import { requireSession } from "../lib/sessionAuth.js";
 import { consoleRoute } from "../lib/roleGuard.js";
+import { logBlocked } from "../lib/security.js";
 import { ROLES } from "../lib/users.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,6 +30,7 @@ interface KeyRow {
 interface StoredKeyRow extends KeyRow {
   expires_at: string | null;
   revoked_at: string | null;
+  customer_id: string | null;
 }
 
 interface GeneratedKey {
@@ -62,19 +65,20 @@ async function insertKey(
   scope: string,
   environment: KeyEnvironment,
   label: string,
+  customerId: string | null = null,
 ): Promise<{ row: KeyRow; plaintext: string }> {
   const generated = generateKey(environment);
   const { rows } = await client.query<KeyRow>(
     `INSERT INTO api_keys
-       (issued_to_tenant_id, key_hash, label, scope, environment, display_hint, creator_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+       (issued_to_tenant_id, key_hash, label, scope, environment, display_hint, creator_user_id, customer_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${KEY_VIEW}`,
-    [tenantId, generated.hash, label, scope, environment, generated.displayHint, creatorUserId],
+    [tenantId, generated.hash, label, scope, environment, generated.displayHint, creatorUserId, customerId],
   );
   return { row: rows[0], plaintext: generated.plaintext };
 }
 
-function creationResponse(row: KeyRow, plaintext: string) {
+function creationResponse(row: KeyRow, plaintext: string, customerId: string | null) {
   return {
     id: row.id,
     key: plaintext,
@@ -82,6 +86,7 @@ function creationResponse(row: KeyRow, plaintext: string) {
     environment: row.environment,
     label: row.label,
     display_hint: row.display_hint,
+    customer_id: customerId,
   };
 }
 
@@ -103,10 +108,16 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       const scope = body.scope;
       const environment = body.environment as KeyEnvironment;
       const label = body.label.trim();
+      const rawCustomerId = (body as { customer_id?: unknown }).customer_id;
+      if (rawCustomerId !== undefined && rawCustomerId !== null && (typeof rawCustomerId !== "string" || !UUID_RE.test(rawCustomerId))) {
+        return reply.code(400).send({ error: "customer_id must be a UUID" });
+      }
+      const customerId = typeof rawCustomerId === "string" ? rawCustomerId : null;
 
       const { tenantId, userId } = req.consolePrincipal!;
       const created = await withTenant(pool, tenantId, async (client) => {
-        const result = await insertKey(client, tenantId, userId, scope, environment, label);
+        if (customerId && !(await customerVisible(client, customerId))) return null;
+        const result = await insertKey(client, tenantId, userId, scope, environment, label, customerId);
         await recordConfigChangeWithClient(client, tenantId, { userId }, {
           objectType: "ApiKey",
           objectId: result.row.id,
@@ -116,11 +127,22 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
             environment: result.row.environment,
             label: result.row.label,
             display_hint: result.row.display_hint,
+            ...(customerId ? { customer_id: customerId } : {}),
           },
         });
         return result;
       });
-      return reply.code(201).send(creationResponse(created.row, created.plaintext));
+      if (!created) {
+        await logBlocked(pool, {
+          actingTenantId: tenantId,
+          endpoint: "/api-keys",
+          method: "POST",
+          detail: "customer_id not visible to caller's tenant",
+          resolvedAction: "blocked_customer_not_visible",
+        });
+        return reply.code(403).send({ error: "customer not found for this tenant" });
+      }
+      return reply.code(201).send(creationResponse(created.row, created.plaintext, customerId));
     });
 
     consoleRoute(scoped, "get", "/api-keys", { role: [...ROLES] }, async (req, reply) => {
@@ -186,7 +208,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
       const { tenantId, userId } = req.consolePrincipal!;
       const rotated = await withTenant(pool, tenantId, async (client) => {
         const old = (await client.query<StoredKeyRow>(
-          `SELECT ${KEY_VIEW}, expires_at, revoked_at
+          `SELECT ${KEY_VIEW}, expires_at, revoked_at, customer_id
            FROM api_keys
            WHERE id = $1 AND issued_to_tenant_id = $2
              AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
@@ -195,7 +217,7 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
         )).rows[0];
         if (!old) return null;
 
-        const created = await insertKey(client, tenantId, userId, old.scope, old.environment, old.label);
+        const created = await insertKey(client, tenantId, userId, old.scope, old.environment, old.label, old.customer_id);
         const expiresAt = (await client.query<{ expires_at: string }>(
           `UPDATE api_keys
            SET expires_at = now() + ($3 * interval '1 hour')
@@ -209,10 +231,10 @@ export function registerApiKeyRoutes(app: FastifyInstance, pool: Pool) {
           before: { status: "active" },
           after: { status: "expiring", expires_at: expiresAt, rotated_to_id: created.row.id },
         });
-        return created;
+        return { ...created, customerId: old.customer_id };
       });
       if (!rotated) return reply.code(403).send({ error: "api key not found for this tenant" });
-      return reply.code(201).send(creationResponse(rotated.row, rotated.plaintext));
+      return reply.code(201).send(creationResponse(rotated.row, rotated.plaintext, rotated.customerId));
     });
 
     consoleRoute(scoped, "post", "/api-keys/:id/revoke", { role: ["Owner", "Developer"] }, async (req, reply) => {

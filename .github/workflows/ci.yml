@@ -180,6 +180,14 @@ jobs:
         working-directory: tests/commits
         run: npx vitest run
 
+      - name: Install customer-hierarchy suite dependencies
+        working-directory: tests/customer-hierarchy
+        run: npm ci
+
+      - name: Run TEID-22 acceptance suite (customer hierarchy, pooled and isolated balances, ceilings, moves)
+        working-directory: tests/customer-hierarchy
+        run: npx vitest run
+
       - name: Install stripe-connect suite dependencies
         working-directory: tests/stripe-connect
         run: npm ci

@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createPool } from "./lib/db.js";
 import { requireAuth } from "./lib/auth.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
+import { registerCustomerHierarchyRoutes } from "./routes/customerHierarchy.js";
 import { registerSecurityRoutes } from "./routes/security.js";
 import { registerSupportRoutes } from "./routes/support.js";
 import { registerAuthRoutes } from "./routes/auth.js";
@@ -54,6 +55,7 @@ export function buildServer() {
   registerStripeCustomerRoutes(app, pool);
   stripeApiBaseUrl();
 
+  registerCustomerHierarchyRoutes(app, pool);
   registerCustomerRoutes(app, pool);
 
   app.register(async (scoped) => {
