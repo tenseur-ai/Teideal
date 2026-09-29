@@ -291,6 +291,18 @@ jobs:
         working-directory: tests/billing-periods
         run: npx vitest run
 
+      # TEID-62-T1/T2-proxy/T3/T5/T6/T7. Run last because the published
+      # quick-start intentionally creates an API key and a usage event. The
+      # human portions of T2 and T4 remain the explicitly manual trial in
+      # docs/quickstart-trial-results.md; there is no fake CI human-timing test.
+      - name: Install documentation suite dependencies
+        working-directory: tests/docs
+        run: npm install --no-audit --no-fund
+
+      - name: Run TEID-62 documentation and quick-start suite
+        working-directory: tests/docs
+        run: npm test
+
   # TEID-59: SDK tests stay independent of the main application suite. They
   # need only go-usage plus the two language toolchains.
   sdk-tests:
