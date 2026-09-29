@@ -357,7 +357,7 @@ func CheckAllTransactionsBalanced(ctx context.Context, pool *db.Pool, now time.T
 	return nil
 }
 
-func postAlert(ctx context.Context, payload alertPayload) error {
+func postAlert(ctx context.Context, payload any) error {
 	url := os.Getenv("ONCALL_ALERT_WEBHOOK_URL")
 	if url == "" {
 		return errors.New("ONCALL_ALERT_WEBHOOK_URL is not configured")

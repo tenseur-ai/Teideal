@@ -60,6 +60,8 @@ func main() {
 	mux.Handle("POST /ledger/transactions", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostLedgerTransaction)))
 	mux.Handle("POST /ledger/transactions/{id}/reverse", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.ReverseLedgerTransaction)))
 	mux.Handle("GET /ledger/transactions/{id}", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetLedgerTransaction)))
+	mux.Handle("POST /customers/{id}/recalculate-balance", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostRecalculateCustomerBalance)))
+	mux.Handle("GET /balance-integrity/checks", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetBalanceIntegrityChecks)))
 
 	if os.Getenv("DISABLE_BACKGROUND_WORKERS") != "true" {
 		interval := 24 * time.Hour
@@ -79,6 +81,30 @@ func main() {
 				case checkedAt := <-ticker.C:
 					if err := ledger.CheckAllTransactionsBalanced(ctx, pool, checkedAt); err != nil {
 						log.Printf("go-usage: ledger integrity check failed: %v", err)
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+
+		balanceInterval := time.Hour
+		if raw := os.Getenv("BALANCE_RECONCILIATION_INTERVAL_MS"); raw != "" {
+			milliseconds, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || milliseconds <= 0 {
+				log.Printf("go-usage: invalid BALANCE_RECONCILIATION_INTERVAL_MS %q; using 1h", raw)
+			} else {
+				balanceInterval = time.Duration(milliseconds) * time.Millisecond
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(balanceInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case checkedAt := <-ticker.C:
+					if err := ledger.ReconcileCustomerBalances(ctx, pool, checkedAt); err != nil {
+						log.Printf("go-usage: balance reconciliation failed: %v", err)
 					}
 				case <-ctx.Done():
 					return
