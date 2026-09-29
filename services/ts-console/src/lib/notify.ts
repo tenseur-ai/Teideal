@@ -14,3 +14,27 @@ export async function sendEmail(pool: Pool, tenantId: string, toEmail: string, s
     );
   });
 }
+
+// Slack incoming webhook. Mirrors go-usage postAlert: config-provided URL,
+// JSON POST, 10s timeout, any non-2xx is a failure. The URL is an argument
+// because each tenant stores its own webhook on billing_alert_thresholds;
+// this service does not import the Go helper.
+const SLACK_TIMEOUT_MS = 10_000;
+
+export async function sendSlackAlert(webhookUrl: string, payload: { text: string }): Promise<void> {
+  if (webhookUrl === "") {
+    throw new Error("slack webhook URL is not configured");
+  }
+  const body = JSON.stringify(payload);
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+  });
+  if (response.status < 200 || response.status >= 300) {
+    await response.arrayBuffer().catch(() => undefined);
+    throw new Error(`webhook returned HTTP ${response.status}`);
+  }
+  await response.arrayBuffer().catch(() => undefined);
+}

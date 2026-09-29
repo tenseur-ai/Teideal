@@ -20,6 +20,8 @@ import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
 import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
+import { balanceAlertIntervalMs, evaluateBalanceAlerts } from "./lib/balanceAlertWorker.js";
+import { registerBillingAlertRoutes } from "./routes/billingAlerts.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
 import { registerStripeCustomerRoutes } from "./routes/stripeCustomers.js";
@@ -70,6 +72,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   registerStripeCustomerRoutes(app, pool);
   registerSandboxRoutes(app, pool);
   registerProcessorLookupRoutes(app, pool);
+  registerBillingAlertRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);
@@ -88,6 +91,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   let exportTimer: NodeJS.Timeout | undefined;
   let grantTimer: NodeJS.Timeout | undefined;
   let commitTimer: NodeJS.Timeout | undefined;
+  let balanceAlertTimer: NodeJS.Timeout | undefined;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -107,6 +111,13 @@ export function buildServer(options: BuildServerOptions = {}) {
     commitTimer = setInterval(() => {
       processCommitDrawdowns(pool).catch((err) => console.error("commit drawdown worker failed:", err));
     }, COMMIT_DRAWDOWN_INTERVAL_MS);
+    // Tests call evaluateBalanceAlerts directly. DISABLE_BACKGROUND_WORKERS
+    // matches go-usage's ticker gate; NODE_ENV=test matches exportTimer.
+    if (process.env.DISABLE_BACKGROUND_WORKERS !== "true") {
+      balanceAlertTimer = setInterval(() => {
+        evaluateBalanceAlerts(pool).catch((err) => console.error("balance alert worker failed:", err));
+      }, balanceAlertIntervalMs());
+    }
   }
 
   app.addHook("onClose", async () => {
@@ -114,6 +125,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     if (exportTimer) clearInterval(exportTimer);
     if (grantTimer) clearInterval(grantTimer);
     if (commitTimer) clearInterval(commitTimer);
+    if (balanceAlertTimer) clearInterval(balanceAlertTimer);
     await pool.end();
   });
 

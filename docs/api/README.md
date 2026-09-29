@@ -27,6 +27,7 @@ executable. Authors must never add `runnable` to a partial or pseudocode block.
 - [Ledger, reservations, and integrity](ledger.md)
 - [Stripe Connect and processor lookup](stripe-connect.md)
 - [Sandboxes](sandbox.md)
+- [Balance threshold alerts](billing-alerts.md)
 - [Exports, audit, support, health, and security operations](operations.md)
 - [Errors and reason values](errors.md)
 
