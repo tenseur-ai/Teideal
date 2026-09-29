@@ -5,8 +5,10 @@
 The cataloged migration grants access to `sandbox_promotions`, but the new
 `POST /tenants/:id/sandbox` endpoint also has to insert into `tenants` while
 the service runs as `teideal_app`. The pre-existing schema grants that role
-only `SELECT` on `tenants`. The migration therefore adds the narrow missing
-`GRANT INSERT ON tenants TO teideal_app`; it does not grant update or delete.
+only `SELECT` on `tenants`. The migration adds `GRANT INSERT ON tenants` for
+that -- see "Architect follow-up" below for the additional narrow `UPDATE
+(id)` grant that turned out to also be required, and why it's scoped to one
+unused column rather than the whole table.
 
 ## Promotion route identifier
 
@@ -39,8 +41,17 @@ sandbox (serializing concurrent creation attempts ahead of the unique-index
 backstop). `FOR UPDATE` requires Postgres's `UPDATE` privilege on the table,
 not just `SELECT` -- confirmed directly against a live Postgres 16 instance
 via `docker logs`, which showed the exact failing statement was the `FOR
-UPDATE` clause, not the plain `SELECT`. The migration now grants
-`INSERT, UPDATE ON tenants`.
+UPDATE` clause, not the plain `SELECT`. The migration first added a
+full-table `GRANT UPDATE`; independent verification then confirmed
+empirically (against a throwaway Postgres 16 instance) that a column-level
+`UPDATE` grant on any single column -- even one nothing ever writes --
+satisfies the same locking requirement, and a repo-wide grep confirmed no
+code path issues a real `UPDATE tenants SET ...` anywhere. The grant was
+narrowed to `GRANT UPDATE (id) ON tenants` accordingly: `id` is a column
+nothing legitimately updates, chosen so the grant obviously can't be
+mistaken for real column-update capability. `tenants` has no RLS, so an
+unnecessarily broad grant here would have been actual blast-radius risk
+for any future bug elsewhere that touches this table.
 
 **Sandbox tenants have no console users**, so the existing session-scoped
 Stripe OAuth flow (`GET /stripe/connect/authorize-url`, `POST

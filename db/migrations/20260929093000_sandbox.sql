@@ -29,8 +29,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS tenants_one_sandbox_per_parent
 -- while creating its sandbox, serializing concurrent creation attempts
 -- ahead of the unique-index backstop above) needs Postgres's UPDATE
 -- privilege, not just SELECT -- confirmed directly against a live
--- Postgres 16 instance, not assumed.
-GRANT INSERT, UPDATE ON tenants TO teideal_app;
+-- Postgres 16 instance, not assumed. A column-level grant on any one
+-- column satisfies this same locking requirement (confirmed empirically);
+-- granted narrowly on `id` -- a column nothing legitimately updates --
+-- rather than the whole table, since no code path here ever issues a real
+-- UPDATE against tenants and tenants has no RLS to otherwise bound one.
+GRANT INSERT ON tenants TO teideal_app;
+GRANT UPDATE (id) ON tenants TO teideal_app;
 
 -- AC3: reviewed plan copies from a sandbox into its production parent.
 CREATE TABLE IF NOT EXISTS sandbox_promotions (
