@@ -11,6 +11,7 @@ import { registerTenantSettingsRoutes } from "./routes/tenantSettings.js";
 import { registerAuditLogRoutes } from "./routes/auditLog.js";
 import { registerApiKeyRoutes } from "./routes/apiKeys.js";
 import { registerPlanRoutes } from "./routes/plans.js";
+import { registerPlanVersionRoutes } from "./routes/planVersions.js";
 import { registerGrantRoutes } from "./routes/grants.js";
 import { registerConsumptionOrderRoutes } from "./routes/consumptionOrder.js";
 import { registerConsumptionRoutes } from "./routes/consumption.js";
@@ -46,6 +47,7 @@ export function buildServer() {
   registerAuditLogRoutes(app, pool);
   registerApiKeyRoutes(app, pool);
   registerPlanRoutes(app, pool);
+  registerPlanVersionRoutes(app, pool);
   registerGrantRoutes(app, pool);
   registerConsumptionOrderRoutes(app, pool);
   registerConsumptionRoutes(app, pool);
