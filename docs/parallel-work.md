@@ -508,6 +508,15 @@ declined in favor of admin-merging with evidence in hand, given three PRs
 contending for shared-runner capacity is itself a temporary, one-night
 condition.
 
+**Worktree cleanup (2026-09-29):** the `teideal-agents/` directory
+accumulates a full checkout (with its own `node_modules`, Go build cache,
+etc.) per dev-agent-spawned story -- ~8.4GB across 9 worktrees by this
+point, all for already-merged stories, safe to remove via `git worktree
+remove`. Worth doing periodically (or after every batch of merges) rather
+than letting it accumulate for a whole session -- it's pure disk/IO
+overhead with zero value once a story is merged, git history already has
+everything.
+
 **Gemini auth (2026-09-27):** Gemini CLI's personal/free Google OAuth login is deprecated for this installed version -- attempting it returns `IneligibleTierError` and redirects to a separate "Antigravity" product. Headless use needs a `GEMINI_API_KEY` (or a working Vertex AI/GCP setup), neither of which was available this session. TEID-94 was reassigned to Codex instead (justified under the "story hasn't been started, no sunk work" exception -- see "If an agent hits a usage-window limit mid-story" above, which applies equally to an agent that can't authenticate at all). Revisit Gemini once an API key is available; until then, treat it as unusable for this workflow.
 
 **A different, non-noise class of CI failure: genuine shared-runner capacity
@@ -531,3 +540,5 @@ story writing a raw-throughput (not just latency-budget) non-functional
 test should default to CI-scoped scaling from the start, following
 TEID-20's precedent, rather than hard-coding catalog-scale numbers the way
 TEID-22-T5 did.
+
+**Fixed (2026-09-29, `fd0b725`, issue #37 closed):** `tests/customer-hierarchy/customer-hierarchy.test.ts`'s `CHECKS_PER_SEC`/`CHECK_P99_MS` now read from `HIERARCHY_CHECK_RATE_TARGET`/`HIERARCHY_CHECK_P99_MS` env vars, defaulting to 50 checks/sec and P99 < 400ms for CI -- the literal catalog numbers (5000/sec, P99 < 20ms) stay available for a dedicated manual run. Took two iterations to land: the first attempt (P99 budget 150ms) still failed once at 190ms on CI, confirming the runner's variance is wide enough (87-235ms observed across runs) that a budget needs real margin above the *worst* value seen, not the average -- widened to 400ms and confirmed green on the next run. Same push's CI run also hit an unrelated, already-known flake (`TEID-59-T6`, SDK-overhead latency, 6.18ms vs a 5ms budget) on a completely different, already-merged suite -- noted for completeness, not something this fix touches.
