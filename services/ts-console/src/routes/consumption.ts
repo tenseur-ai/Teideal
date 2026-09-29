@@ -1,5 +1,11 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Pool } from "pg";
+import {
+  checkHierarchyLimits,
+  customerIsNested,
+  lockBillingGrants,
+  resolveBillingCustomerId,
+} from "../lib/customerHierarchy.js";
 import { consumeAcrossGrants, listConsumptionTimeline, validateCustomerConsumeInput } from "../lib/consumptionOrder.js";
 import { withTenant } from "../lib/db.js";
 import { customerVisible } from "../lib/grants.js";
@@ -10,6 +16,7 @@ import { ROLES } from "../lib/users.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CUSTOMER_NOT_VISIBLE = "customer not found for this tenant";
+const INSUFFICIENT_BALANCE = "insufficient balance";
 
 function pageQuery(
   query: { limit?: unknown; cursor?: unknown },
@@ -53,15 +60,33 @@ export function registerConsumptionRoutes(app: FastifyInstance, pool: Pool) {
       const parsed = validateCustomerConsumeInput(req.body);
       if ("error" in parsed) return reply.code(400).send({ error: parsed.error });
       const tenantId = req.consolePrincipal!.tenantId;
-      const consumed = await withTenant(pool, tenantId, async (client) => {
-        if (!(await customerVisible(client, id))) return null;
-        return consumeAcrossGrants(client, tenantId, id, parsed);
+      // Nested customers are ceiling-checked before the draw. A standalone
+      // root keeps consumeAcrossGrants' overage path. The pre-lock matches
+      // lockEligibleGrants' row order so the check and the unmodified draw
+      // observe the same grant rows.
+      const outcome = await withTenant(pool, tenantId, async (client) => {
+        if (!(await customerVisible(client, id))) return { kind: "invisible" as const };
+        const billingCustomerId = await resolveBillingCustomerId(client, tenantId, id);
+        if (await customerIsNested(client, tenantId, id)) {
+          await lockBillingGrants(client, tenantId, billingCustomerId, parsed.as_of);
+          const limits = await checkHierarchyLimits(client, tenantId, id, parsed.amount, parsed.as_of);
+          if (!limits.ok) return { kind: "insufficient" as const, limits };
+        }
+        const record = await consumeAcrossGrants(client, tenantId, billingCustomerId, parsed);
+        return { kind: "ok" as const, record };
       });
-      if (!consumed) {
+      if (outcome.kind === "invisible") {
         await rejectInvisibleCustomer(pool, tenantId, "/customers/:id/consume", "POST", reply);
         return;
       }
-      return reply.code(201).send(consumed);
+      if (outcome.kind === "insufficient") {
+        return reply.code(409).send({
+          error: INSUFFICIENT_BALANCE,
+          governing_customer_id: outcome.limits.governingCustomerId,
+          available: outcome.limits.available,
+        });
+      }
+      return reply.code(201).send(outcome.record);
     });
 
     consoleRoute(scoped, "get", "/customers/:id/consumption-timeline", { role: [...ROLES] }, async (req, reply) => {
