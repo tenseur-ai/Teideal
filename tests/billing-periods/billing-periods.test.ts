@@ -44,12 +44,17 @@ describe("TEID-96 billing periods, time zones, and boundary rules", () => {
         event_type: "billing_timestamp",
         quantity: 1.25,
         idempotency_key: idempotencyKey,
-        occurred_at: "2026-03-10T02:30:00-05:00",
+        // A date safely in the future (TEID-34 now queues an event whose
+        // billing period has already closed relative to real time instead
+        // of inserting it directly -- this test is exercising offset
+        // arithmetic, not period-closing behavior, so it needs a date
+        // that stays in an open period for as long as this suite exists).
+        occurred_at: "2030-03-10T02:30:00-05:00",
       },
     });
 
     expect(created.status).toBe(201);
-    expect(utc(created.body.occurred_at)).toBe("2026-03-10T07:30:00.000Z");
+    expect(utc(created.body.occurred_at)).toBe("2030-03-10T07:30:00.000Z");
     expect(String(created.body.quantity)).toBe("1.25");
 
     const listed = await call(`${GO_USAGE_URL}/usage?customer_id=${fx.tenant2.customerId}`, {
@@ -58,7 +63,7 @@ describe("TEID-96 billing periods, time zones, and boundary rules", () => {
     expect(listed.status).toBe(200);
     const stored = listed.body.data.find((event: { idempotency_key: string }) => event.idempotency_key === idempotencyKey);
     expect(stored).toBeDefined();
-    expect(utc(stored.occurred_at)).toBe("2026-03-10T07:30:00.000Z");
+    expect(utc(stored.occurred_at)).toBe("2030-03-10T07:30:00.000Z");
 
     const offsetless = await call(`${GO_USAGE_URL}/usage`, {
       method: "POST",
@@ -226,15 +231,16 @@ describe("TEID-96 billing periods, time zones, and boundary rules", () => {
       idempotency_key: idempotencyKey,
     };
 
+    // Same future-date rationale as TEID-96-T1 above -- see its comment.
     const first = await call(`${GO_USAGE_URL}/usage`, {
       method: "POST",
       apiKey: fx.tenant2.apiKey,
-      body: [{ ...common, occurred_at: "2026-03-31T23:59:59.9995Z" }],
+      body: [{ ...common, occurred_at: "2030-03-31T23:59:59.9995Z" }],
     });
     const duplicate = await call(`${GO_USAGE_URL}/usage`, {
       method: "POST",
       apiKey: fx.tenant2.apiKey,
-      body: [{ ...common, occurred_at: "2026-04-01T00:00:00.0005Z" }],
+      body: [{ ...common, occurred_at: "2030-04-01T00:00:00.0005Z" }],
     });
 
     expect(first.status).toBe(207);
@@ -249,11 +255,11 @@ describe("TEID-96 billing periods, time zones, and boundary rules", () => {
     expect(listed.status).toBe(200);
     const matching = listed.body.data.filter((event: { idempotency_key: string }) => event.idempotency_key === idempotencyKey);
     expect(matching).toHaveLength(1);
-    expect(utc(matching[0].occurred_at)).toBe("2026-03-31T23:59:59.999Z");
+    expect(utc(matching[0].occurred_at)).toBe("2030-03-31T23:59:59.999Z");
 
     const assigned = await resolve(matching[0].occurred_at);
     expect(assigned.status).toBe(200);
-    expect(utc(assigned.body.period_start)).toBe("2026-03-01T00:00:00.000Z");
-    expect(utc(assigned.body.period_end)).toBe("2026-04-01T00:00:00.000Z");
+    expect(utc(assigned.body.period_start)).toBe("2030-03-01T00:00:00.000Z");
+    expect(utc(assigned.body.period_end)).toBe("2030-04-01T00:00:00.000Z");
   });
 });
