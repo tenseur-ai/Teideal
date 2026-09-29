@@ -48,6 +48,9 @@ func main() {
 	mux.Handle("GET /usage", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetUsage)))
 	mux.Handle("GET /usage/summary", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetUsageSummary)))
 	mux.Handle("POST /usage", auth.Middleware(pool.Pool, "ingest-only")(http.HandlerFunc(h.PostUsage)))
+	mux.Handle("GET /customers/{id}/reservations", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.ListCustomerReservations)))
+	mux.Handle("GET /customers/{id}/ledger-transactions", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.ListCustomerLedgerTransactions)))
+	mux.Handle("GET /ledger/transactions/{id}/detail", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetLedgerTransactionDetail)))
 	mux.Handle("GET /idempotency-conflicts", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetIdempotencyConflicts)))
 	mux.Handle("GET /rounding-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetRoundingConfig)))
 	mux.Handle("PUT /rounding-config", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PutRoundingConfig)))
@@ -62,7 +65,7 @@ func main() {
 	mux.Handle("GET /ledger/transactions/{id}", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetLedgerTransaction)))
 	mux.Handle("POST /customers/{id}/recalculate-balance", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostRecalculateCustomerBalance)))
 	mux.Handle("GET /balance-integrity/checks", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetBalanceIntegrityChecks)))
-	mux.Handle("GET /adjustments", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.GetAdjustments)))
+	mux.Handle("GET /adjustments", auth.Middleware(pool.Pool, "read-only")(http.HandlerFunc(h.GetAdjustments)))
 	mux.Handle("POST /adjustments/{id}/approve", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostApproveAdjustment)))
 	mux.Handle("POST /adjustments/{id}/reject", auth.Middleware(pool.Pool, "admin")(http.HandlerFunc(h.PostRejectAdjustment)))
 

@@ -15,20 +15,20 @@ import (
 )
 
 type usageAdjustment struct {
-	ID                     string          `json:"id"`
-	CustomerID             string          `json:"customer_id"`
-	EventType              string          `json:"event_type"`
-	Quantity               decimal.Decimal `json:"quantity"`
-	IdempotencyKey         string          `json:"idempotency_key"`
-	OccurredAt             time.Time       `json:"occurred_at"`
-	PeriodStart            time.Time       `json:"period_start"`
-	PeriodEnd              time.Time       `json:"period_end"`
-	Status                 string          `json:"status"`
-	AutoApproved           bool            `json:"auto_approved"`
-	ReviewedByUserID       *string         `json:"reviewed_by_user_id,omitempty"`
-	ReviewedAt             *time.Time      `json:"reviewed_at,omitempty"`
-	ResultingUsageEventID  *string         `json:"resulting_usage_event_id,omitempty"`
-	CreatedAt              time.Time       `json:"created_at"`
+	ID                    string          `json:"id"`
+	CustomerID            string          `json:"customer_id"`
+	EventType             string          `json:"event_type"`
+	Quantity              decimal.Decimal `json:"quantity"`
+	IdempotencyKey        string          `json:"idempotency_key"`
+	OccurredAt            time.Time       `json:"occurred_at"`
+	PeriodStart           time.Time       `json:"period_start"`
+	PeriodEnd             time.Time       `json:"period_end"`
+	Status                string          `json:"status"`
+	AutoApproved          bool            `json:"auto_approved"`
+	ReviewedByUserID      *string         `json:"reviewed_by_user_id,omitempty"`
+	ReviewedAt            *time.Time      `json:"reviewed_at,omitempty"`
+	ResultingUsageEventID *string         `json:"resulting_usage_event_id,omitempty"`
+	CreatedAt             time.Time       `json:"created_at"`
 }
 
 func scanUsageAdjustment(row pgx.Row) (usageAdjustment, error) {
@@ -52,10 +52,10 @@ const usageAdjustmentColumns = `
 	reviewed_by_user_id, reviewed_at, resulting_usage_event_id, created_at
 `
 
-// GetAdjustments handles GET /adjustments?status=. The review-queue stand-in
-// -- no console UI exists anywhere in this repo, matching every prior
-// story's established pattern (TEID-31's idempotency_conflicts, TEID-33's
-// balance_integrity_checks).
+// GetAdjustments handles GET /adjustments?status=&customer_id=&since=&until=.
+// The review-queue stand-in -- no console UI exists anywhere in this repo,
+// matching every prior story's established pattern (TEID-31's
+// idempotency_conflicts, TEID-33's balance_integrity_checks).
 func (h *Handlers) GetAdjustments(w http.ResponseWriter, r *http.Request) {
 	principal, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -67,9 +67,44 @@ func (h *Handlers) GetAdjustments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "status must be pending, approved, or rejected")
 		return
 	}
+	var customerFilter *string
+	if raw := r.URL.Query().Get("customer_id"); raw != "" {
+		if _, err := uuid.Parse(raw); err != nil {
+			writeErr(w, http.StatusBadRequest, "customer_id must be a UUID")
+			return
+		}
+		if scopedToOtherCustomer(principal, raw) {
+			denyCustomerNotVisible(w, r, h, principal, "/adjustments", "customer_id not visible to caller's tenant")
+			return
+		}
+		customerFilter = &raw
+	} else if principal.CustomerID != nil {
+		customerFilter = principal.CustomerID
+	}
+	since, until, err := parseSinceUntil(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := parseLimit(r.URL.Query().Get("limit"), maxListLimit, maxListLimit)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cursorTime, cursorID, err := decodeTimeIDCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var cursorTimeArg *time.Time
+	var cursorIDArg *string
+	if cursorID != "" {
+		cursorTimeArg = &cursorTime
+		cursorIDArg = &cursorID
+	}
 
 	adjustments := []usageAdjustment{}
-	err := h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var statusFilter *string
 		if status != "" {
 			statusFilter = &status
@@ -78,9 +113,13 @@ func (h *Handlers) GetAdjustments(w http.ResponseWriter, r *http.Request) {
 			SELECT `+usageAdjustmentColumns+`
 			FROM usage_adjustments
 			WHERE ($1::text IS NULL OR status = $1)
-			ORDER BY created_at
-			LIMIT 500
-		`, statusFilter)
+			  AND ($2::uuid IS NULL OR customer_id = $2)
+			  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
+			  AND ($4::timestamptz IS NULL OR occurred_at < $4)
+			  AND ($5::timestamptz IS NULL OR (occurred_at, id) < ($5, $6::uuid))
+			ORDER BY occurred_at DESC, id DESC
+			LIMIT $7
+		`, statusFilter, customerFilter, since, until, cursorTimeArg, cursorIDArg, limit+1)
 		if err != nil {
 			return err
 		}
@@ -98,7 +137,13 @@ func (h *Handlers) GetAdjustments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "list adjustments failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": adjustments})
+	var next *string
+	if len(adjustments) > limit {
+		adjustments = adjustments[:limit]
+		c := encodeTimeIDCursor(adjustments[len(adjustments)-1].OccurredAt, adjustments[len(adjustments)-1].ID)
+		next = &c
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": adjustments, "cursor": next})
 }
 
 func reviewAdjustment(

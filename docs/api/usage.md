@@ -1,14 +1,19 @@
 # Usage ingestion, queries, idempotency conflicts, and adjustments
 
-These `go-usage` routes use API keys. Exact batch item status/reason values are
-listed in [errors.md](errors.md).
+These `go-usage` routes use API keys, except where noted. Exact batch item
+status/reason values are listed in [errors.md](errors.md). Read-only routes
+also accept a console session's Bearer token, resolved as a tenant-scoped
+`read-only` principal (`internal/auth.Resolve` falls back to a
+`sessions.token_hash` hit after the API-key lookup misses) -- this lets
+`ts-console` forward the caller's own session to fan out reads for the
+[customer timeline](timeline.md).
 
 ## GET /usage [go-usage]
 
-- **Auth:** `read-only` or `admin` API key.
-- **Request:** Optional UUID `customer_id` and boolean `prior_period_adjustments` query filters.
-- **Response:** `200 {data:[{id,customer_id,event_type,quantity,idempotency_key,occurred_at,is_prior_period_adjustment}]}`; at most 200.
-- **Errors:** `400` invalid filters; `401/403` invalid key/scope; `500` query failure.
+- **Auth:** `read-only` or `admin` API key, or a console session.
+- **Request:** Optional UUID `customer_id`, boolean `prior_period_adjustments`, and `group_by=hour` (returns `event_type`/hour-bucketed aggregates instead of individual events) query filters.
+- **Response:** `200 {data:[{id,customer_id,event_type,quantity,idempotency_key,occurred_at,is_prior_period_adjustment}]}` (default); with `group_by=hour`, `200 {data:[{event_type,hour,count,quantity}]}`. At most 200 rows per call.
+- **Errors:** `400` invalid filters; `401/403` invalid key/scope/session; `500` query failure.
 
 ```bash
 curl "$GO_USAGE_URL/usage?customer_id=$CUSTOMER_ID" -H "authorization: Bearer $API_KEY"
@@ -49,10 +54,10 @@ curl "$GO_USAGE_URL/idempotency-conflicts?customer_id=$CUSTOMER_ID" -H "authoriz
 
 ## GET /adjustments [go-usage]
 
-- **Auth:** `admin` API key.
-- **Request:** Optional `status` (`pending`, `approved`, `rejected`).
+- **Auth:** `read-only` or `admin` API key, or a console session.
+- **Request:** Optional `status` (`pending`, `approved`, `rejected`), UUID `customer_id`, `since`/`until`, and `limit`.
 - **Response:** `200 {data}` late-usage adjustment records.
-- **Errors:** `400` invalid status; `401/403` invalid key/scope; `500` query failure.
+- **Errors:** `400` invalid status/UUID/date range; `401/403` invalid key/scope/session, or `customer_id` not visible to caller's tenant; `500` query failure.
 
 ```bash
 curl "$GO_USAGE_URL/adjustments?status=pending" -H "authorization: Bearer $API_KEY"

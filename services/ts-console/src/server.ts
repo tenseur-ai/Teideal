@@ -30,6 +30,7 @@ import { stripeApiBaseUrl } from "./lib/stripeCustomers.js";
 import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 import { registerSandboxRoutes } from "./routes/sandbox.js";
 import { rejectDeprecatedRoute } from "./lib/deprecatedRoutes.js";
+import { registerTimelineRoutes } from "./routes/timeline.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -77,6 +78,7 @@ export function buildServer(options: BuildServerOptions = {}) {
 
   registerCustomerHierarchyRoutes(app, pool);
   registerCustomerRoutes(app, pool);
+  registerTimelineRoutes(app, pool);
 
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireAuth(pool));

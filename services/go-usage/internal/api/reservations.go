@@ -95,3 +95,93 @@ func (h *Handlers) PostReservation(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
+
+// ListCustomerReservations handles GET /customers/{id}/reservations.
+func (h *Handlers) ListCustomerReservations(w http.ResponseWriter, r *http.Request) {
+	principal, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	customerID := r.PathValue("id")
+	if _, err := uuid.Parse(customerID); err != nil {
+		writeErr(w, http.StatusBadRequest, "id must be a UUID")
+		return
+	}
+	if scopedToOtherCustomer(principal, customerID) {
+		denyCustomerNotVisible(w, r, h, principal, "/customers/{id}/reservations", "customer_id not visible to caller's tenant")
+		return
+	}
+	since, until, err := parseSinceUntil(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	limit, err := parseLimit(r.URL.Query().Get("limit"), defaultListLimit, maxListLimit)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cursorTime, cursorID, err := decodeTimeIDCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var cursorTimeArg *time.Time
+	var cursorIDArg *string
+	if cursorID != "" {
+		cursorTimeArg = &cursorTime
+		cursorIDArg = &cursorID
+	}
+
+	items := []reservation{}
+	var missing bool
+	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		visible, visErr := customerVisible(ctx, tx, customerID)
+		if visErr != nil {
+			return visErr
+		}
+		if !visible {
+			missing = true
+			return nil
+		}
+		rows, qerr := tx.Query(ctx, `
+			SELECT id, tenant_id, customer_id, usage_event_id, created_at
+			FROM reservations
+			WHERE customer_id = $1
+			  AND ($2::timestamptz IS NULL OR created_at >= $2)
+			  AND ($3::timestamptz IS NULL OR created_at < $3)
+			  AND ($4::timestamptz IS NULL OR (created_at, id) < ($4, $5::uuid))
+			ORDER BY created_at DESC, id DESC
+			LIMIT $6
+		`, customerID, since, until, cursorTimeArg, cursorIDArg, limit+1)
+		if qerr != nil {
+			return qerr
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item reservation
+			if err := rows.Scan(&item.ID, &item.TenantID, &item.CustomerID, &item.UsageEventID, &item.CreatedAt); err != nil {
+				return err
+			}
+			items = append(items, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		log.Printf("ListCustomerReservations: %v", err)
+		writeErr(w, http.StatusInternalServerError, "failed to list reservations")
+		return
+	}
+	if missing {
+		denyCustomerNotVisible(w, r, h, principal, "/customers/{id}/reservations", "customer_id not visible to caller's tenant")
+		return
+	}
+	var next *string
+	if len(items) > limit {
+		items = items[:limit]
+		c := encodeTimeIDCursor(items[len(items)-1].CreatedAt, items[len(items)-1].ID)
+		next = &c
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": items, "cursor": next})
+}

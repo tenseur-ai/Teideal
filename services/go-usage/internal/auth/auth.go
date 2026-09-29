@@ -8,16 +8,19 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Principal struct {
-	TenantID  string
-	TenantKey string // e.g. "acct_1001", for logging/tests only
-	Scope     string
-	UserID    *string // creator of the API key, when the key is user-attributed
+	TenantID   string
+	TenantKey  string // e.g. "acct_1001", for logging/tests only
+	Scope      string
+	UserID     *string // creator of the API key, when the key is user-attributed
+	CustomerID *string // api_keys.customer_id when the key is customer-scoped (TEID-22)
+	APIKeyID   string
 }
 
 var ErrNoKey = errors.New("auth: missing or malformed authorization header")
@@ -34,27 +37,57 @@ func hashKey(plaintext string) string {
 // a tenant-scoped transaction: the caller has no tenant context yet, that's
 // exactly what this call produces.
 func Resolve(ctx context.Context, pool *pgxpool.Pool, plaintextKey string) (Principal, error) {
+	keyHash := hashKey(plaintextKey)
 	row := pool.QueryRow(ctx, `
-		SELECT k.id, t.id, t.external_key, k.scope, k.creator_user_id
+		SELECT k.id, t.id, t.external_key, k.scope, k.creator_user_id, k.customer_id
 		FROM api_keys k
 		JOIN tenants t ON t.id = k.issued_to_tenant_id
 		WHERE k.key_hash = $1
 		  AND k.revoked_at IS NULL
 		  AND (k.expires_at IS NULL OR k.expires_at > now())
-	`, hashKey(plaintextKey))
+	`, keyHash)
 
 	var p Principal
-	var apiKeyID string
-	if err := row.Scan(&apiKeyID, &p.TenantID, &p.TenantKey, &p.Scope, &p.UserID); err != nil {
+	if err := row.Scan(&p.APIKeyID, &p.TenantID, &p.TenantKey, &p.Scope, &p.UserID, &p.CustomerID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return Principal{}, ErrUnknownKey
+			return resolveSession(ctx, pool, keyHash)
 		}
 		return Principal{}, err
 	}
 	// last_used_at is informational rather than a security control. Do not
 	// reject an otherwise valid request if this best-effort display update
 	// loses a race or transiently fails.
-	_, _ = pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, apiKeyID)
+	_, _ = pool.Exec(ctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, p.APIKeyID)
+	return p, nil
+}
+
+// resolveSession accepts a console session token so ts-console can fan out
+// to go-usage with the same Bearer credential a support agent already holds.
+// Sessions are tenant-scoped and read-only; they never carry api_keys.customer_id.
+func resolveSession(ctx context.Context, pool *pgxpool.Pool, tokenHash string) (Principal, error) {
+	row := pool.QueryRow(ctx, `
+		SELECT s.id, t.id, t.external_key, s.user_id, s.idle_timeout_minutes, s.last_seen_at
+		FROM sessions s
+		JOIN tenants t ON t.id = s.issued_to_tenant_id
+		WHERE s.token_hash = $1
+	`, tokenHash)
+
+	var p Principal
+	var sessionID string
+	var idleTimeoutMinutes int
+	var lastSeen time.Time
+	if err := row.Scan(&sessionID, &p.TenantID, &p.TenantKey, &p.UserID, &idleTimeoutMinutes, &lastSeen); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Principal{}, ErrUnknownKey
+		}
+		return Principal{}, err
+	}
+	if time.Since(lastSeen) > time.Duration(idleTimeoutMinutes)*time.Minute {
+		_, _ = pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sessionID)
+		return Principal{}, ErrUnknownKey
+	}
+	_, _ = pool.Exec(ctx, `UPDATE sessions SET last_seen_at = now() WHERE id = $1`, sessionID)
+	p.Scope = "read-only"
 	return p, nil
 }
 
