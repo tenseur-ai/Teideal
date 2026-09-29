@@ -70,3 +70,37 @@ Existing list endpoints (api-keys, plans) keyset-paginate by `id`. Timeline
 sources are ordered by timestamp descending, so go-usage list cursors are
 opaque base64url `{t, id}` pairs (still keyset, not offset). The aggregation
 endpoint's `next_cursor` is the same idea over `(occurred_at, type:id)`.
+
+## Architect follow-up (2026-09-29): the security-sensitive auth change is
+## sound, but the route's own role guard was decorative
+
+Independent verification specifically attacked the session-token-on-go-usage
+change described above: minted a real console session and threw it directly
+at every other go-usage endpoint, not just the new timeline ones.
+`auth.Resolve` hardcodes a session-derived `Principal.Scope` to `"read-only"`,
+and `Middleware`'s existing scope check (`principal.Scope != requiredScope &&
+principal.Scope != "admin"`) already rejects it on every admin/ingest-only
+route -- confirmed live (403 on `POST /usage`, `POST /reservations`,
+`GET /ledger/transactions/{id}`, `GET /idempotency-conflicts`; 200 only on
+the pre-existing read-only routes). Cross-tenant: a session for tenant 1
+reading tenant 2's real ledger-transaction detail returned 404 with no data
+leaked. Revocation (logout) propagates immediately. No exploitable gap found.
+
+One real, non-exploitable gap was found in `timeline.ts` itself:
+`registerTimelineRoutes` doesn't use the shared `consoleRoute()`/`guard()`
+helper every other route file uses (it can't -- `guard()` unconditionally
+reads `req.consolePrincipal.role`, which only session auth sets, and this
+route also accepts API keys, which set `req.principal` instead). Its own
+custom `requireTimelineAuth` preHandler pushed `{ role: [...ROLES] }` into
+`CONSOLE_ROUTE_AUDIT` for bookkeeping but never actually checked the
+session's role against it -- not currently exploitable, since `ROLES` is
+every role and role-checking would have been a no-op regardless, but a
+latent risk: a future story narrowing this route's allowed roles would
+silently have no effect. Fixed by having `requireTimelineAuth`'s session
+branch check `req.consolePrincipal.role` against the same role list it
+already declares to the audit log, the same way `guard()` does for every
+other route -- `requireTimelineAuth(pool, roles)` now takes an optional
+role list (defaulting to `ROLES`, unchanged behavior today) for a future
+story to actually narrow. Reverified: `tsc --noEmit` clean, `tests/
+customer-timeline` 8/8 (including T1's normal-session path and T8's
+cross-tenant denial), `tests/cross-tenant` 75/75.

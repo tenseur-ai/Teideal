@@ -20,7 +20,7 @@ import { customerVisible } from "../lib/grants.js";
 import { CONSOLE_ROUTE_AUDIT } from "../lib/roleGuard.js";
 import { logBlocked } from "../lib/security.js";
 import { requireSession } from "../lib/sessionAuth.js";
-import { ROLES } from "../lib/users.js";
+import { ROLES, type Role } from "../lib/users.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 100;
@@ -67,7 +67,16 @@ function authorizationHeader(req: FastifyRequest): string | undefined {
   return header;
 }
 
-function requireTimelineAuth(pool: Pool) {
+// consoleRoute()/guard() can't gate this route: guard() unconditionally
+// reads req.consolePrincipal.role, which is only ever set by session auth,
+// and would throw on an API-key request (which sets req.principal instead).
+// This route accepts either, so it needs its own preHandler -- but that
+// preHandler must actually enforce the role it claims to (see the
+// CONSOLE_ROUTE_AUDIT push below), not just record it for the audit log.
+// An API-key request has no console role to check (its own scope check
+// above already gates it); a session request's role is checked here the
+// same way guard() checks it everywhere else.
+function requireTimelineAuth(pool: Pool, roles: readonly Role[] = ROLES) {
   return async (req: FastifyRequest, reply: FastifyReply) => {
     const header = authorizationHeader(req);
     if (!header) {
@@ -82,7 +91,14 @@ function requireTimelineAuth(pool: Pool) {
       req.principal = apiPrincipal;
       return;
     }
-    return requireSession(pool)(req, reply);
+    await requireSession(pool)(req, reply);
+    if (reply.sent) return;
+    const role = req.consolePrincipal!.role;
+    if (!roles.includes(role)) {
+      return reply.code(403).send({
+        error: `this action requires role ${roles.join(" or ")}; your role is ${role}`,
+      });
+    }
   };
 }
 
