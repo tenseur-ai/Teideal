@@ -156,6 +156,14 @@ jobs:
         working-directory: tests/plans
         run: npx vitest run
 
+      - name: Install plan-versions suite dependencies
+        working-directory: tests/plan-versions
+        run: npm ci
+
+      - name: Run TEID-23 acceptance suite (versioned pricing, scheduled migrations, grandfather vs migrate, concurrency)
+        working-directory: tests/plan-versions
+        run: npx vitest run
+
       - name: Install grants suite dependencies
         working-directory: tests/grants
         run: npm ci

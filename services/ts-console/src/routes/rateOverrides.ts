@@ -3,6 +3,7 @@ import type { Pool } from "pg";
 import { recordConfigChangeWithClient } from "../lib/audit.js";
 import { withTenant } from "../lib/db.js";
 import { customerVisible } from "../lib/grants.js";
+import { resolveEffectivePlanId } from "../lib/planVersions.js";
 import {
   checkOverlap,
   insertOverride,
@@ -22,6 +23,7 @@ import { ROLES } from "../lib/users.js";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CUSTOMER_NOT_VISIBLE = "customer not found for this tenant";
 const NO_RATE = "no rate configured for this metric/model on this plan";
+const NO_SUBSCRIPTION = "no plan subscription for this customer";
 const OVERLAP = "an overlapping rate override already exists for this customer, metric, and model";
 const PRECEDENCE_RULE =
   "An active customer rate override always takes precedence over the plan rate for the same metric and model. When no override is active, or the override's date range has ended, pricing uses the plan's configured rate.";
@@ -127,12 +129,18 @@ export function registerRateOverrideRoutes(app: FastifyInstance, pool: Pool) {
       const tenantId = req.consolePrincipal!.tenantId;
       const priced = await withTenant(pool, tenantId, async (client) => {
         if (!(await customerVisible(client, id))) return { kind: "invisible" as const };
-        if (!(await planVisible(client, parsed.plan_id))) return { kind: "no_rate" as const };
+        let planId = parsed.plan_id;
+        if (planId === undefined) {
+          const resolvedPlanId = await resolveEffectivePlanId(client, tenantId, id, parsed.as_of);
+          if (!resolvedPlanId) return { kind: "no_subscription" as const };
+          planId = resolvedPlanId;
+        }
+        if (!(await planVisible(client, planId))) return { kind: "no_rate" as const };
         const resolved = await resolveEffectiveRate(
           client,
           tenantId,
           id,
-          parsed.plan_id,
+          planId,
           parsed.metric,
           parsed.model,
           parsed.as_of,
@@ -142,7 +150,7 @@ export function registerRateOverrideRoutes(app: FastifyInstance, pool: Pool) {
           client,
           tenantId,
           id,
-          parsed.plan_id,
+          planId,
           parsed.metric,
           parsed.model,
           parsed.quantity,
@@ -156,6 +164,7 @@ export function registerRateOverrideRoutes(app: FastifyInstance, pool: Pool) {
         await rejectInvisibleCustomer(pool, tenantId, "/customers/:id/price-usage", "POST", reply);
         return;
       }
+      if (priced.kind === "no_subscription") return reply.code(404).send({ error: NO_SUBSCRIPTION });
       if (priced.kind === "no_rate") return reply.code(404).send({ error: NO_RATE });
       return reply.code(201).send(priced.line);
     });

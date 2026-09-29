@@ -13,7 +13,7 @@ export interface CreateOverrideInput {
 }
 
 export interface PriceUsageInput {
-  plan_id: string;
+  plan_id: string | undefined;
   metric: string;
   model: string | null;
   quantity: number;
@@ -132,8 +132,11 @@ function validateQuantity(value: unknown): OverrideValidationError | { value: nu
   return { value };
 }
 
-function validatePlanId(value: unknown): OverrideValidationError | { value: string } {
-  if (value === undefined || value === null) return { error: "plan_id is required" };
+function validatePlanId(value: unknown): OverrideValidationError | { value: string | undefined } {
+  // Omitted plan_id is resolved from the customer's subscription. An explicit
+  // null keeps the original required-field error.
+  if (value === undefined) return { value: undefined };
+  if (value === null) return { error: "plan_id is required" };
   if (typeof value !== "string" || !UUID_RE.test(value)) return { error: "plan_id must be a UUID" };
   return { value };
 }
