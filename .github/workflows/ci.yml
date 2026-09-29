@@ -220,6 +220,14 @@ jobs:
         working-directory: tests/sandbox
         run: npx vitest run
 
+      - name: Install processor-neutrality suite dependencies
+        working-directory: tests/processor-neutrality
+        run: npm ci
+
+      - name: Run TEID-74 acceptance suite (processor-neutral identifiers, disconnect invariance, lookup latency, mid-flight disconnect)
+        working-directory: tests/processor-neutrality
+        run: npx vitest run
+
       - name: Install rate-overrides suite dependencies
         working-directory: tests/rate-overrides
         run: npm ci

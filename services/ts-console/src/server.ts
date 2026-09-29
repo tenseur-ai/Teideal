@@ -23,6 +23,7 @@ import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } 
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
 import { registerStripeCustomerRoutes } from "./routes/stripeCustomers.js";
+import { registerProcessorLookupRoutes } from "./routes/processorLookup.js";
 import { stripeApiBaseUrl } from "./lib/stripeCustomers.js";
 import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 import { registerSandboxRoutes } from "./routes/sandbox.js";
@@ -57,6 +58,7 @@ export function buildServer() {
   registerStripeConnectRoutes(app, pool);
   registerStripeCustomerRoutes(app, pool);
   registerSandboxRoutes(app, pool);
+  registerProcessorLookupRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);
