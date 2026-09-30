@@ -85,6 +85,12 @@ export interface AdjustmentRow {
   created_at: string;
 }
 
+export interface PeriodCloseLedgerRow {
+  customer_id: string;
+  usage_billed: string;
+  adjustments: string;
+}
+
 export interface ListQuery {
   since?: string;
   until?: string;
@@ -232,4 +238,15 @@ export async function listAdjustments(
   const { status, body } = await goUsageGet(path, authorization);
   requireOk(status, body, "list adjustments failed");
   return asList<AdjustmentRow>(body);
+}
+
+export async function getPeriodCloseLedgerSummary(
+  authorization: string,
+  since: string,
+  until: string,
+): Promise<PeriodCloseLedgerRow[]> {
+  const path = withQuery("/period-close/ledger-summary", { since, until });
+  const { status, body } = await goUsageGet(path, authorization, 120_000);
+  requireOk(status, body, "period-close ledger summary failed");
+  return asList<PeriodCloseLedgerRow>(body).data;
 }

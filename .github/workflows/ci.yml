@@ -279,6 +279,14 @@ jobs:
         working-directory: tests/currency-rounding
         run: npm ci
 
+      - name: Install period-close suite dependencies
+        working-directory: tests/period-close
+        run: npm ci
+
+      - name: Run TEID-50 acceptance suite (ledger tie-out, exports, 50k scale, search, late adjustments, and zero activity)
+        working-directory: tests/period-close
+        run: npx vitest run
+
       - name: Run TEID-94 acceptance suite (currency precision, exact decimal arithmetic, rounding points, methods, adjustments, adversarial validation)
         working-directory: tests/currency-rounding
         run: npx vitest run

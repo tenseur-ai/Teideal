@@ -24,6 +24,7 @@ executable. Authors must never add `runnable` to a partial or pseudocode block.
 - [Grants and entitlement state](grants.md)
 - [Usage ingestion and adjustments](usage.md)
 - [Money, billing periods, and rounding](billing.md)
+- [Period close](period-close.md)
 - [Ledger, reservations, and integrity](ledger.md)
 - [Stripe Connect and processor lookup](stripe-connect.md)
 - [Sandboxes](sandbox.md)
