@@ -45,6 +45,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 (cd "$REPO_ROOT" && git worktree add "$DEST" -b "$BRANCH" "$BASE")
 
+# Normalize DEST to a POSIX path (Git Bash's `pwd`), regardless of whether the
+# caller passed a Windows-style (backslash) or POSIX-style path. This matters
+# because NPM_CACHE_DIR gets embedded inside a double-quoted TOML string
+# below (the `-c shell_environment_policy.set=...` argument) -- TOML basic
+# strings treat backslash as an escape character, so a raw Windows path like
+# `C:\Users\kiran\...` silently corrupts that argument (`\t` becomes a tab
+# escape, etc.), and codex then fails with "invalid type: string ..., expected
+# a map" because it can no longer parse the value as an inline table at all.
+# Confirmed this exact failure mode once (TEID-48's first spawn attempt);
+# normalizing DEST up front avoids it regardless of which path style a future
+# caller passes.
+DEST="$(cd "$DEST" && pwd)"
+
 CACHE_ROOT="$(cd "$(dirname "$DEST")" && pwd)"
 GOCACHE_DIR="$CACHE_ROOT/.gocache"
 GOMODCACHE_DIR="$CACHE_ROOT/.gomodcache"
