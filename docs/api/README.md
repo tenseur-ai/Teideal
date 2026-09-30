@@ -30,6 +30,7 @@ executable. Authors must never add `runnable` to a partial or pseudocode block.
 - [Sandboxes](sandbox.md)
 - [Balance threshold alerts](billing-alerts.md)
 - [Billing webhooks](webhooks.md)
+- [Billing connectors](connectors.md)
 - [Customer timeline](timeline.md)
 - [Exports, audit, support, health, and security operations](operations.md)
 - [Errors and reason values](errors.md)
