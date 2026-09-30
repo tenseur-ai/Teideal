@@ -16,3 +16,13 @@ They were resolved conservatively as follows:
    continue returning 500 on their retries. This retains the configured 10%
    page failure rate and guarantees that the contract suite can prove it flags
    an exhausted page.
+
+## TEID-98.1 (post-merge follow-up, 2026-09-30)
+
+Implements `specs/TEID-98.1.md`, a remediation for three real gaps an
+independent review found in the merged design above (`passthrough`/invoice
+lines missing from the common model, a hardcoded 2-decimal currency
+assumption, no persisted incremental-sync watermark). See that spec's own
+"Scoping notes" for the full reasoning. Notes on this round's own
+implementation choices go here, appended below this line by whichever agent
+implements it.
