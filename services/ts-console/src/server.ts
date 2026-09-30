@@ -33,6 +33,7 @@ import { registerSandboxRoutes } from "./routes/sandbox.js";
 import { rejectDeprecatedRoute } from "./lib/deprecatedRoutes.js";
 import { registerTimelineRoutes } from "./routes/timeline.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
+import { registerPeriodCloseRoutes } from "./routes/periodClose.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -77,6 +78,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   registerSandboxRoutes(app, pool);
   registerProcessorLookupRoutes(app, pool);
   registerBillingAlertRoutes(app, pool);
+  registerPeriodCloseRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);
