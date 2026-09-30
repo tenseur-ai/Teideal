@@ -34,6 +34,7 @@ import { rejectDeprecatedRoute } from "./lib/deprecatedRoutes.js";
 import { registerTimelineRoutes } from "./routes/timeline.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerPeriodCloseRoutes } from "./routes/periodClose.js";
+import { registerConnectorRoutes } from "./routes/connectors.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -79,6 +80,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   registerProcessorLookupRoutes(app, pool);
   registerBillingAlertRoutes(app, pool);
   registerPeriodCloseRoutes(app, pool);
+  registerConnectorRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);
