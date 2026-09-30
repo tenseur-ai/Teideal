@@ -19,8 +19,9 @@ import { registerRateOverrideRoutes } from "./routes/rateOverrides.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { sweepExpiredSessions } from "./lib/sessions.js";
 import { processPendingExports, processScheduledExports } from "./lib/exportWorker.js";
-import { processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
+import { checkExpiringSoonGrants, processCommitDrawdowns, processExpiredGrants, processRecurringGrants } from "./lib/grantWorker.js";
 import { balanceAlertIntervalMs, evaluateBalanceAlerts } from "./lib/balanceAlertWorker.js";
+import { evaluateWebhookRetries, webhookDeliveryIntervalMs } from "./lib/webhookDeliveryWorker.js";
 import { registerBillingAlertRoutes } from "./routes/billingAlerts.js";
 import { registerExportFormatRoute, registerExportRoutes } from "./routes/exports.js";
 import { registerStripeConnectRoutes } from "./routes/stripeConnect.js";
@@ -31,6 +32,7 @@ import { assertStripeConfig, StripeConfigError } from "./lib/stripeConnect.js";
 import { registerSandboxRoutes } from "./routes/sandbox.js";
 import { rejectDeprecatedRoute } from "./lib/deprecatedRoutes.js";
 import { registerTimelineRoutes } from "./routes/timeline.js";
+import { registerWebhookRoutes } from "./routes/webhooks.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -57,6 +59,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   app.get("/healthz", async () => ({ status: "ok" }));
 
   registerSecurityRoutes(app, pool, adminSecret);
+  registerWebhookRoutes(app, pool, adminSecret);
   registerAuthRoutes(app, pool);
   registerTenantSettingsRoutes(app, pool);
   registerAuditLogRoutes(app, pool);
@@ -94,6 +97,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   let grantTimer: NodeJS.Timeout | undefined;
   let commitTimer: NodeJS.Timeout | undefined;
   let balanceAlertTimer: NodeJS.Timeout | undefined;
+  let webhookDeliveryTimer: NodeJS.Timeout | undefined;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -106,7 +110,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     // they can pass a fixed instant. Issuance is idempotent per period, so
     // this timer cannot double-issue when it overlaps a manual run.
     grantTimer = setInterval(() => {
-      Promise.all([processRecurringGrants(pool), processExpiredGrants(pool)])
+      Promise.all([processRecurringGrants(pool), processExpiredGrants(pool), checkExpiringSoonGrants(pool)])
         .catch((err) => console.error("grant worker failed:", err));
     }, GRANT_WORKER_INTERVAL_MS);
     // Tests call processCommitDrawdowns directly with a fixed instant.
@@ -119,6 +123,9 @@ export function buildServer(options: BuildServerOptions = {}) {
       balanceAlertTimer = setInterval(() => {
         evaluateBalanceAlerts(pool).catch((err) => console.error("balance alert worker failed:", err));
       }, balanceAlertIntervalMs());
+      webhookDeliveryTimer = setInterval(() => {
+        evaluateWebhookRetries(pool).catch((err) => console.error("webhook delivery worker failed:", err));
+      }, webhookDeliveryIntervalMs());
     }
   }
 
@@ -128,6 +135,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     if (grantTimer) clearInterval(grantTimer);
     if (commitTimer) clearInterval(commitTimer);
     if (balanceAlertTimer) clearInterval(balanceAlertTimer);
+    if (webhookDeliveryTimer) clearInterval(webhookDeliveryTimer);
     await pool.end();
   });
 

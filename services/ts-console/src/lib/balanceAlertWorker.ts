@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { withTenant } from "./db.js";
 import { sendEmail, sendSlackAlert } from "./notify.js";
+import { emitWebhookEvent, tenantHasActiveWebhookEndpoints } from "./webhooks.js";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_WINDOW_MS = 60 * 1000;
@@ -460,6 +461,47 @@ async function evaluateTenant(pool: Pool, tenantId: string, now: Date): Promise<
   const wonKeys = await withTenant(pool, tenantId, (client) => claimSlots(client, placeholders));
   const won = fresh.filter((row) => wonKeys.has(dedupKey(row.grantId, row.thresholdPct, row.periodStart)));
   const lostClaim = fresh.length - won.length;
+
+  // Webhooks are a fourth delivery channel. The claimed set is the only
+  // source of new crossings, and webhook configuration is independent of
+  // the operator email/Slack/customer-email channel configuration below.
+  // Checked once per tenant, not per candidate: a tenant with zero webhook
+  // endpoints (the common case) skips the whole loop below rather than
+  // paying for a wasted dedup insert per candidate at bulk-tick scale.
+  const hasWebhooks = won.length > 0 && (await tenantHasActiveWebhookEndpoints(pool, tenantId));
+  for (const candidate of hasWebhooks ? won : []) {
+    await emitWebhookEvent(
+      pool,
+      tenantId,
+      "threshold.reached",
+      `threshold:${candidate.grantId}:${candidate.thresholdPct}:${candidate.periodStart}`,
+      {
+        customer_id: candidate.customerId,
+        customer_name: candidate.customerName,
+        grant_id: candidate.grantId,
+        threshold_pct: candidate.thresholdPct,
+        remaining_amount: numericToJson(candidate.remainingAmount),
+        amount: numericToJson(candidate.amount),
+        period_start: candidate.periodStart,
+      },
+    );
+    if (candidate.thresholdPct === 100) {
+      await emitWebhookEvent(
+        pool,
+        tenantId,
+        "balance.depleted",
+        `depleted:${candidate.grantId}:${candidate.periodStart}`,
+        {
+          customer_id: candidate.customerId,
+          customer_name: candidate.customerName,
+          grant_id: candidate.grantId,
+          remaining_amount: 0,
+          amount: numericToJson(candidate.amount),
+          period_start: candidate.periodStart,
+        },
+      );
+    }
+  }
 
   const toDeliver = won.filter(hasChannels);
   const noChannel = won.filter((row) => !hasChannels(row));

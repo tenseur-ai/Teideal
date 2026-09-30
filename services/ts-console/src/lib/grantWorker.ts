@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { computeNextTranche, trancheCount, type DrawdownSchedule } from "./commitSchedule.js";
 import { withTenant } from "./db.js";
+import { emitWebhookEvent, tenantHasActiveWebhookEndpoints } from "./webhooks.js";
 
 // "monthly" is the only cadence this story issues. The key is the UTC year
 // and month so two runs on either side of a local midnight still agree.
@@ -11,6 +12,15 @@ export function monthlyPeriodKey(now: Date): string {
 
 async function tenantIds(pool: Pool): Promise<string[]> {
   return (await pool.query<{ id: string }>("SELECT id FROM tenants ORDER BY id")).rows.map((row) => row.id);
+}
+
+function numericToJson(value: string): number | string {
+  const trimmed = value.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return value;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER) return value;
+  if (Number.isInteger(parsed)) return parsed;
+  return String(parsed) === trimmed ? parsed : value;
 }
 
 // One statement for every active template in the tenant: the partial unique
@@ -56,9 +66,18 @@ export async function processRecurringGrants(pool: Pool, now = new Date()): Prom
 interface ExpiredGrant {
   id: string;
   tenant_id: string;
+  customer_id: string;
   remaining_amount: string;
   source: string;
   carries_over: boolean;
+}
+
+interface ExpiringSoonGrant {
+  id: string;
+  customer_id: string;
+  expiry_date: Date | string;
+  remaining_amount: string;
+  amount: string;
 }
 
 interface DueCommit {
@@ -74,9 +93,9 @@ interface DueCommit {
 // Claim and settle in the same transaction. SKIP LOCKED lets a second
 // worker take the rows this one does not already hold, instead of waiting
 // and then expiring them again.
-async function expireForTenant(client: PoolClient, now: Date): Promise<number> {
+async function expireForTenant(client: PoolClient, now: Date): Promise<ExpiredGrant[]> {
   const claimed = await client.query<ExpiredGrant>(
-    `SELECT id, tenant_id, remaining_amount::text AS remaining_amount, source, carries_over
+    `SELECT id, tenant_id, customer_id, remaining_amount::text AS remaining_amount, source, carries_over
      FROM grants
      WHERE status = 'active' AND expiry_date IS NOT NULL AND expiry_date <= $1
      FOR UPDATE SKIP LOCKED`,
@@ -93,15 +112,73 @@ async function expireForTenant(client: PoolClient, now: Date): Promise<number> {
     );
     await client.query(`UPDATE grants SET status = 'expired' WHERE id = $1`, [row.id]);
   }
-  return claimed.rows.length;
+  return claimed.rows;
 }
 
 export async function processExpiredGrants(pool: Pool, now = new Date()): Promise<number> {
   let expired = 0;
   for (const tenantId of await tenantIds(pool)) {
-    expired += await withTenant(pool, tenantId, (client) => expireForTenant(client, now));
+    const rows = await withTenant(pool, tenantId, (client) => expireForTenant(client, now));
+    expired += rows.length;
+    // The expiry transaction has committed before any external delivery is
+    // attempted, so webhook availability cannot roll back grant correctness.
+    // Checked once per tenant, matching balanceAlertWorker's own fix for the
+    // same class of bulk-tick regression (TEID-47-T5).
+    const hasWebhooks = rows.length > 0 && (await tenantHasActiveWebhookEndpoints(pool, tenantId));
+    for (const row of hasWebhooks ? rows : []) {
+      await emitWebhookEvent(pool, tenantId, "grant.expired", `expired:${row.id}`, {
+        customer_id: row.customer_id,
+        grant_id: row.id,
+        source: row.source,
+        expired_amount: numericToJson(row.remaining_amount),
+      });
+    }
   }
   return expired;
+}
+
+export function grantExpiringSoonDays(): number {
+  const raw = process.env.GRANT_EXPIRING_SOON_DAYS;
+  if (raw === undefined || raw === "") return 7;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(`invalid GRANT_EXPIRING_SOON_DAYS ${JSON.stringify(raw)}; using 7`);
+    return 7;
+  }
+  return parsed;
+}
+
+export async function checkExpiringSoonGrants(pool: Pool, now = new Date()): Promise<number> {
+  const days = grantExpiringSoonDays();
+  let checked = 0;
+  for (const tenantId of await tenantIds(pool)) {
+    const rows = await withTenant(pool, tenantId, async (client) =>
+      (await client.query<ExpiringSoonGrant>(
+        `SELECT id, customer_id, expiry_date,
+                remaining_amount::text AS remaining_amount, amount::text AS amount
+         FROM grants
+         WHERE status = 'active'
+           AND expiry_date IS NOT NULL
+           AND expiry_date > $1
+           AND expiry_date <= $1 + ($2 || ' days')::interval
+         ORDER BY id`,
+        [now, days],
+      )).rows,
+    );
+    checked += rows.length;
+    const hasWebhooks = rows.length > 0 && (await tenantHasActiveWebhookEndpoints(pool, tenantId));
+    for (const row of hasWebhooks ? rows : []) {
+      const expiryDate = row.expiry_date instanceof Date ? row.expiry_date : new Date(row.expiry_date);
+      await emitWebhookEvent(pool, tenantId, "grant.expiring_soon", `expiring_soon:${row.id}`, {
+        customer_id: row.customer_id,
+        grant_id: row.id,
+        expiry_date: expiryDate.toISOString(),
+        remaining_amount: numericToJson(row.remaining_amount),
+        amount: numericToJson(row.amount),
+      });
+    }
+  }
+  return checked;
 }
 
 // One due tranche per claimed commit. A later anniversary that is already

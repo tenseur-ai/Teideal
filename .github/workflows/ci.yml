@@ -307,6 +307,14 @@ jobs:
         working-directory: tests/balance-alerts
         run: npx vitest run
 
+      - name: Install webhooks suite dependencies
+        working-directory: tests/webhooks
+        run: npm ci
+
+      - name: Run TEID-48 acceptance suite (signing, retries, delivery logs, resends, scale, and adversarial verification)
+        working-directory: tests/webhooks
+        run: npx vitest run
+
       # TEID-62-T1/T2-proxy/T3/T5/T6/T7. Run last because the published
       # quick-start intentionally creates an API key and a usage event. The
       # human portions of T2 and T4 remain the explicitly manual trial in
