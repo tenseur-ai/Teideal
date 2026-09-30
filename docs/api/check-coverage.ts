@@ -38,6 +38,10 @@ export async function registeredRoutes(): Promise<ApiRoute[]> {
   const routes: ApiRoute[] = [];
   const app = buildServer({
     onRoute(route) {
+      // Internal service-to-service endpoints are not part of the public API
+      // reference. Their static-admin-key contract is documented in code,
+      // not exposed as a tenant-facing route.
+      if (route.url.startsWith("/internal/")) return;
       const methods = Array.isArray(route.method) ? route.method : [route.method];
       for (const methodValue of methods) {
         const method = String(methodValue).toUpperCase();

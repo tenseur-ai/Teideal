@@ -1,0 +1,22 @@
+{
+  "name": "@teideal/webhook-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-48 acceptance suite: signed billing webhooks, retries, logs, resends, scale, and adversarial verification.",
+  "scripts": {
+    "test": "vitest run",
+    "fake-webhook-receiver": "tsx fake-webhook-receiver.ts"
+  },
+  "dependencies": {
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}

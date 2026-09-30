@@ -206,8 +206,20 @@ func ReconcileCustomerBalances(ctx context.Context, pool *db.Pool, now time.Time
 				Discrepancy:         mismatch.Discrepancy.String(),
 				DetectedAt:          mismatch.DetectedAt,
 			}
-			if err := postAlert(ctx, payload); err != nil {
-				log.Printf("balance reconciliation: alert tenant %s customer %s: %v", tenantID, mismatch.CustomerID, err)
+			alertErr := postAlert(ctx, payload)
+			dedupKey := fmt.Sprintf(
+				"mismatch:%s:%s:%s",
+				mismatch.CustomerID,
+				mismatch.AccountCode,
+				mismatch.DetectedAt.Format(time.RFC3339),
+			)
+			// Tenant webhook delivery is auxiliary: its failure is logged but
+			// cannot change the existing on-call alert/alert_sent flow.
+			if err := postWebhookEvent(ctx, tenantID, "reconciliation.mismatch", dedupKey, payload); err != nil {
+				log.Printf("balance reconciliation: tenant webhook tenant %s customer %s: %v", tenantID, mismatch.CustomerID, err)
+			}
+			if alertErr != nil {
+				log.Printf("balance reconciliation: alert tenant %s customer %s: %v", tenantID, mismatch.CustomerID, alertErr)
 				continue
 			}
 			if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
