@@ -1,10 +1,18 @@
 import type { Pool } from "pg";
 import { withTenant } from "../db.js";
 
+export interface SyncWatermarkPosition {
+  since: string | null;
+  cursor: string | null;
+}
+
+export type SyncWatermark = Record<string, SyncWatermarkPosition>;
+
 export interface SyncOutcome {
   status: "succeeded" | "failed";
   recordsSynced: number;
   errorMessage?: string;
+  watermark?: SyncWatermark;
 }
 
 export interface ConnectorSyncHealth {
@@ -15,6 +23,7 @@ export interface ConnectorSyncHealth {
   last_sync_at: string | null;
   last_sync_status: "running" | "succeeded" | "failed" | null;
   consecutive_failures: number;
+  cursor_high_water: SyncWatermark;
 }
 
 interface SyncHealthRow extends Omit<ConnectorSyncHealth, "last_sync_at"> {
@@ -48,6 +57,10 @@ export async function completeSync(
   if (outcome.status === "succeeded" && outcome.errorMessage !== undefined) {
     throw new Error("a succeeded sync cannot have an errorMessage");
   }
+  const errorMessage = outcome.errorMessage?.slice(0, 500) ?? null;
+  const successfulWatermark = outcome.status === "succeeded" && outcome.watermark !== undefined
+    ? JSON.stringify(outcome.watermark)
+    : null;
 
   await withTenant(pool, tenantId, async (client) => {
     const { rows } = await client.query<{ connector_id: string }>(
@@ -55,7 +68,7 @@ export async function completeSync(
        SET completed_at = now(), status = $1, records_synced = $2, error_message = $3
        WHERE id = $4 AND tenant_id = $5 AND status = 'running'
        RETURNING connector_id`,
-      [outcome.status, outcome.recordsSynced, outcome.errorMessage ?? null, syncId, tenantId],
+      [outcome.status, outcome.recordsSynced, errorMessage, syncId, tenantId],
     );
     const sync = rows[0];
     if (!sync) throw new Error("running connector sync not found");
@@ -66,9 +79,14 @@ export async function completeSync(
              WHEN $1 = 'succeeded' THEN 0
              ELSE consecutive_failures + 1
            END,
+           cursor_high_water = CASE
+             WHEN $1 = 'succeeded' AND $4::jsonb IS NOT NULL
+               THEN cursor_high_water || $4::jsonb
+             ELSE cursor_high_water
+           END,
            updated_at = now()
        WHERE id = $2 AND tenant_id = $3`,
-      [outcome.status, sync.connector_id, tenantId],
+      [outcome.status, sync.connector_id, tenantId, successfulWatermark],
     );
     if (updated.rowCount !== 1) throw new Error("connector not found");
   });
@@ -80,7 +98,8 @@ export async function getSyncHealth(pool: Pool, tenantId: string): Promise<Conne
       `SELECT c.id AS connector_id, c.connector_type, c.display_name, c.status,
               latest.started_at AS last_sync_at,
               latest.status AS last_sync_status,
-              c.consecutive_failures
+              c.consecutive_failures,
+              c.cursor_high_water
        FROM connectors c
        LEFT JOIN (
          SELECT DISTINCT ON (connector_id)

@@ -38,6 +38,8 @@ const nullableString: FieldCheck = (value) => value === null || typeof value ===
 const timestamp: FieldCheck = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
 const nullableTimestamp: FieldCheck = (value) => value === null || timestamp(value);
 const decimal: FieldCheck = (value) => typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value);
+const nonNullObject: FieldCheck = (value) => typeof value === "object" && value !== null;
+const nonEmptyArray: FieldCheck = (value) => Array.isArray(value) && value.length >= 1;
 
 function validFields(value: unknown, fields: Record<string, FieldCheck>): boolean {
   if (!value || typeof value !== "object") return false;
@@ -60,13 +62,13 @@ async function firstPages(connector: Connector): Promise<ConnectorPage<unknown>[
 function mappingResult(pages: ConnectorPage<unknown>[]): ContractCheckResult {
   const [customers, prices, contracts, invoices, credits, payments, refunds] = pages;
   const checks = [
-    validFields(customers.data[0], { id: stringValue, name: stringValue, email: nullableString, created_at: timestamp }),
-    validFields(prices.data[0], { id: stringValue, product_name: stringValue, amount: decimal, currency: stringValue, billing_scheme: stringValue }),
-    validFields(contracts.data[0], { id: stringValue, customer_id: stringValue, status: stringValue, started_at: timestamp, ended_at: nullableTimestamp }),
-    validFields(invoices.data[0], { id: stringValue, customer_id: stringValue, amount: decimal, currency: stringValue, status: stringValue, issued_at: timestamp, due_at: nullableTimestamp }),
-    validFields(credits.data[0], { id: stringValue, customer_id: stringValue, amount: decimal, currency: stringValue, reason: nullableString, issued_at: timestamp }),
-    validFields(payments.data[0], { id: stringValue, customer_id: stringValue, invoice_id: nullableString, amount: decimal, currency: stringValue, status: stringValue, paid_at: timestamp }),
-    validFields(refunds.data[0], { id: stringValue, payment_id: stringValue, amount: decimal, currency: stringValue, reason: nullableString, refunded_at: timestamp }),
+    validFields(customers.data[0], { id: stringValue, name: stringValue, email: nullableString, created_at: timestamp, passthrough: nonNullObject }),
+    validFields(prices.data[0], { id: stringValue, product_name: stringValue, amount: decimal, currency: stringValue, billing_scheme: stringValue, passthrough: nonNullObject }),
+    validFields(contracts.data[0], { id: stringValue, customer_id: stringValue, status: stringValue, started_at: timestamp, ended_at: nullableTimestamp, passthrough: nonNullObject }),
+    validFields(invoices.data[0], { id: stringValue, customer_id: stringValue, amount: decimal, currency: stringValue, status: stringValue, issued_at: timestamp, due_at: nullableTimestamp, lines: nonEmptyArray, passthrough: nonNullObject }),
+    validFields(credits.data[0], { id: stringValue, customer_id: stringValue, amount: decimal, currency: stringValue, reason: nullableString, issued_at: timestamp, passthrough: nonNullObject }),
+    validFields(payments.data[0], { id: stringValue, customer_id: stringValue, invoice_id: nullableString, amount: decimal, currency: stringValue, status: stringValue, paid_at: timestamp, passthrough: nonNullObject }),
+    validFields(refunds.data[0], { id: stringValue, payment_id: stringValue, amount: decimal, currency: stringValue, reason: nullableString, refunded_at: timestamp, passthrough: nonNullObject }),
   ];
   return checks.every(Boolean)
     ? { passed: true, message: "all seven entity types map every common field with decimal-string money" }

@@ -26,3 +26,22 @@ assumption, no persisted incremental-sync watermark). See that spec's own
 "Scoping notes" for the full reasoning. Notes on this round's own
 implementation choices go here, appended below this line by whichever agent
 implements it.
+
+- The common fixture mappers now reserve only normalized source keys and copy
+  every remaining top-level fixture key into `passthrough`. Optional source
+  fields map to explicit `null`/empty-array values, keeping every returned
+  entity structurally stable even when older fixtures omit the new data.
+- Minor-unit conversion uses an explicit 0-digit set (JPY, KRW, VND), an
+  explicit 3-digit set (KWD, BHD, OMR, JOD), and a safe 2-digit default. The
+  conversion slices padded strings and never coerces an amount through
+  `Number`.
+- `completeSync` serializes a supplied successful watermark for a shallow
+  JSONB merge in the existing connector-row update. Failed outcomes bind no
+  watermark value, so they cannot advance prior progress; their stored error
+  text is sliced to 500 characters.
+- The sync-health route already returned the rows from `getSyncHealth`
+  directly, so adding `cursor_high_water` to that query and result type passes
+  it through without changing the established role gate.
+- No conflict was found between `specs/TEID-98.1.md` and
+  `TEID-98.1-Claude-Prompt.md`; the source prompt therefore required no
+  precedence resolution.

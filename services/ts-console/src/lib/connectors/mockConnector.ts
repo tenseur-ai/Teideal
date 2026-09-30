@@ -5,6 +5,7 @@ import type {
   ConnectorCredit,
   ConnectorCustomer,
   ConnectorInvoice,
+  ConnectorInvoiceLine,
   ConnectorPayment,
   ConnectorPrice,
   ConnectorRefund,
@@ -14,30 +15,56 @@ type RawId = string | { id: string };
 type RawTime = number | string;
 
 export interface StripeLikeCustomer {
+  [key: string]: unknown;
   id: string;
   name: string;
   email: string | null;
   created: RawTime;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikePrice {
+  [key: string]: unknown;
   id: string;
-  product: string | { name: string };
+  product: string | { id?: string; name: string };
   unit_amount: number | string;
   currency: string;
   billing_scheme: string;
   created?: RawTime;
+  interval?: string | null;
+  recurring?: { interval?: string | null } | null;
+  nickname?: string | null;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikeContract {
+  [key: string]: unknown;
   id: string;
   customer: RawId;
   status: string;
   start_date: RawTime;
   ended_at: RawTime | null;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
+}
+
+export interface StripeLikeInvoiceLine {
+  [key: string]: unknown;
+  id: string;
+  price?: RawId | null;
+  description?: string | null;
+  quantity: number | string;
+  unit_amount: number | string;
+  amount: number | string;
+  currency?: string;
+  period_start?: RawTime | null;
+  period_end?: RawTime | null;
 }
 
 export interface StripeLikeInvoice {
+  [key: string]: unknown;
   id: string;
   customer: RawId;
   amount_due: number | string;
@@ -45,18 +72,30 @@ export interface StripeLikeInvoice {
   status: string;
   created: RawTime;
   due_date: RawTime | null;
+  number?: string | null;
+  period_start?: RawTime | null;
+  period_end?: RawTime | null;
+  subtotal?: number | string | null;
+  tax?: number | string | null;
+  lines?: StripeLikeInvoiceLine[];
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikeCredit {
+  [key: string]: unknown;
   id: string;
   customer: RawId;
   amount: number | string;
   currency: string;
   reason: string | null;
   created: RawTime;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikePayment {
+  [key: string]: unknown;
   id: string;
   customer: RawId;
   invoice: RawId | null;
@@ -64,15 +103,23 @@ export interface StripeLikePayment {
   currency: string;
   status: string;
   created: RawTime;
+  processor_charge_id?: RawId | null;
+  charge?: RawId | null;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikeRefund {
+  [key: string]: unknown;
   id: string;
   payment: RawId;
   amount: number | string;
   currency: string;
   reason: string | null;
   created: RawTime;
+  processor_refund_id?: RawId | null;
+  external_updated_at?: RawTime | null;
+  updated?: RawTime | null;
 }
 
 export interface StripeLikeExport {
@@ -106,87 +153,201 @@ function iso(value: RawTime): string {
   return date.toISOString();
 }
 
+function nullableIso(value: RawTime | null | undefined): string | null {
+  return value === null || value === undefined ? null : iso(value);
+}
+
+function externalUpdatedAt(
+  normalized: RawTime | null | undefined,
+  stripeLike: RawTime | null | undefined,
+): string | null {
+  return nullableIso(normalized ?? stripeLike);
+}
+
+function nullableId(value: RawId | null | undefined): string | null {
+  return value === null || value === undefined ? null : idOf(value);
+}
+
 // Stripe-shaped fixture amounts are integer minor units. Converting with
-// string arithmetic keeps cent accuracy and never passes through a float.
-function decimalAmount(value: number | string): string {
+// string arithmetic keeps exact decimal accuracy and never passes through a float.
+const ZERO_DECIMAL_CURRENCIES = new Set(["JPY", "KRW", "VND"]);
+const THREE_DECIMAL_CURRENCIES = new Set(["KWD", "BHD", "OMR", "JOD"]);
+
+export function currencyMinorDigits(currency: string): number {
+  const code = currency.toUpperCase();
+  if (ZERO_DECIMAL_CURRENCIES.has(code)) return 0;
+  if (THREE_DECIMAL_CURRENCIES.has(code)) return 3;
+  return 2;
+}
+
+export function decimalAmount(value: number | string, currency: string): string {
   const raw = String(value);
   if (!/^-?\d+$/.test(raw)) {
     throw new ConnectorError(`invalid fixture money amount: ${raw}`, 0, false);
   }
   const negative = raw.startsWith("-");
-  const digits = (negative ? raw.slice(1) : raw).replace(/^0+(?=\d)/, "").padStart(3, "0");
-  const whole = digits.slice(0, -2);
-  const fraction = digits.slice(-2);
+  const digits = (negative ? raw.slice(1) : raw).replace(/^0+(?=\d)/, "");
+  const scale = currencyMinorDigits(currency);
+  if (scale === 0) return `${negative ? "-" : ""}${digits}`;
+  const padded = digits.padStart(scale + 1, "0");
+  const whole = padded.slice(0, -scale);
+  const fraction = padded.slice(-scale);
   return `${negative ? "-" : ""}${whole}.${fraction}`;
 }
 
+function nullableDecimalAmount(value: number | string | null | undefined, currency: string): string | null {
+  return value === null || value === undefined ? null : decimalAmount(value, currency);
+}
+
+function decimalQuantity(value: number | string): string {
+  const raw = String(value);
+  if (!/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    throw new ConnectorError(`invalid fixture quantity: ${raw}`, 0, false);
+  }
+  return raw;
+}
+
 export function mapConnectorCustomer(row: StripeLikeCustomer): ConnectorCustomer {
-  return { id: row.id, name: row.name, email: row.email, created_at: iso(row.created) };
+  const { id, name, email, created, external_updated_at, updated, ...passthrough } = row;
+  return {
+    id,
+    name,
+    email,
+    created_at: iso(created),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
+  };
 }
 
 export function mapConnectorPrice(row: StripeLikePrice): ConnectorPrice {
+  const {
+    id, product, unit_amount, currency, billing_scheme, interval, recurring, nickname,
+    external_updated_at, updated, ...passthrough
+  } = row;
   return {
-    id: row.id,
-    product_name: typeof row.product === "string" ? row.product : row.product.name,
-    amount: decimalAmount(row.unit_amount),
-    currency: row.currency.toUpperCase(),
-    billing_scheme: row.billing_scheme,
+    id,
+    product_name: typeof product === "string" ? product : product.name,
+    amount: decimalAmount(unit_amount, currency),
+    currency: currency.toUpperCase(),
+    billing_scheme,
+    interval: interval ?? recurring?.interval ?? null,
+    product_id: typeof product === "string" ? product : product.id ?? null,
+    nickname: nickname ?? null,
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
   };
 }
 
 export function mapConnectorContract(row: StripeLikeContract): ConnectorContract {
+  const { id, customer, status, start_date, ended_at, external_updated_at, updated, ...passthrough } = row;
   return {
-    id: row.id,
-    customer_id: idOf(row.customer),
-    status: row.status,
-    started_at: iso(row.start_date),
-    ended_at: row.ended_at === null ? null : iso(row.ended_at),
+    id,
+    customer_id: idOf(customer),
+    status,
+    started_at: iso(start_date),
+    ended_at: nullableIso(ended_at),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
+  };
+}
+
+export function mapConnectorInvoiceLine(
+  row: StripeLikeInvoiceLine,
+  invoiceId: string,
+  invoiceCurrency: string,
+): ConnectorInvoiceLine {
+  const {
+    id, price, description, quantity, unit_amount, amount, currency = invoiceCurrency,
+    period_start, period_end, ...passthrough
+  } = row;
+  return {
+    id,
+    invoice_id: invoiceId,
+    price_id: nullableId(price),
+    description: description ?? null,
+    quantity: decimalQuantity(quantity),
+    unit_amount: decimalAmount(unit_amount, currency),
+    amount: decimalAmount(amount, currency),
+    currency: currency.toUpperCase(),
+    period_start: nullableIso(period_start),
+    period_end: nullableIso(period_end),
+    passthrough,
   };
 }
 
 export function mapConnectorInvoice(row: StripeLikeInvoice): ConnectorInvoice {
+  const {
+    id, customer, amount_due, currency, status, created, due_date, number: invoiceNumber,
+    period_start, period_end, subtotal, tax, lines = [], external_updated_at, updated,
+    ...passthrough
+  } = row;
   return {
-    id: row.id,
-    customer_id: idOf(row.customer),
-    amount: decimalAmount(row.amount_due),
-    currency: row.currency.toUpperCase(),
-    status: row.status,
-    issued_at: iso(row.created),
-    due_at: row.due_date === null ? null : iso(row.due_date),
+    id,
+    customer_id: idOf(customer),
+    amount: decimalAmount(amount_due, currency),
+    currency: currency.toUpperCase(),
+    status,
+    issued_at: iso(created),
+    due_at: nullableIso(due_date),
+    number: invoiceNumber ?? null,
+    period_start: nullableIso(period_start),
+    period_end: nullableIso(period_end),
+    subtotal: nullableDecimalAmount(subtotal, currency),
+    tax: nullableDecimalAmount(tax, currency),
+    lines: lines.map((line) => mapConnectorInvoiceLine(line, id, currency)),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
   };
 }
 
 export function mapConnectorCredit(row: StripeLikeCredit): ConnectorCredit {
+  const { id, customer, amount, currency, reason, created, external_updated_at, updated, ...passthrough } = row;
   return {
-    id: row.id,
-    customer_id: idOf(row.customer),
-    amount: decimalAmount(row.amount),
-    currency: row.currency.toUpperCase(),
-    reason: row.reason,
-    issued_at: iso(row.created),
+    id,
+    customer_id: idOf(customer),
+    amount: decimalAmount(amount, currency),
+    currency: currency.toUpperCase(),
+    reason,
+    issued_at: iso(created),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
   };
 }
 
 export function mapConnectorPayment(row: StripeLikePayment): ConnectorPayment {
+  const {
+    id, customer, invoice, amount, currency, status, created, processor_charge_id, charge,
+    external_updated_at, updated, ...passthrough
+  } = row;
   return {
-    id: row.id,
-    customer_id: idOf(row.customer),
-    invoice_id: row.invoice === null ? null : idOf(row.invoice),
-    amount: decimalAmount(row.amount),
-    currency: row.currency.toUpperCase(),
-    status: row.status,
-    paid_at: iso(row.created),
+    id,
+    customer_id: idOf(customer),
+    invoice_id: nullableId(invoice),
+    amount: decimalAmount(amount, currency),
+    currency: currency.toUpperCase(),
+    status,
+    paid_at: iso(created),
+    processor_charge_id: nullableId(processor_charge_id ?? charge),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
   };
 }
 
 export function mapConnectorRefund(row: StripeLikeRefund): ConnectorRefund {
+  const {
+    id, payment, amount, currency, reason, created, processor_refund_id,
+    external_updated_at, updated, ...passthrough
+  } = row;
   return {
-    id: row.id,
-    payment_id: idOf(row.payment),
-    amount: decimalAmount(row.amount),
-    currency: row.currency.toUpperCase(),
-    reason: row.reason,
-    refunded_at: iso(row.created),
+    id,
+    payment_id: idOf(payment),
+    amount: decimalAmount(amount, currency),
+    currency: currency.toUpperCase(),
+    reason,
+    refunded_at: iso(created),
+    processor_refund_id: nullableId(processor_refund_id),
+    external_updated_at: externalUpdatedAt(external_updated_at, updated),
+    passthrough,
   };
 }
 
