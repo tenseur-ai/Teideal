@@ -15,13 +15,29 @@ interface IssuedCode {
 interface StripeCustomerRecord {
   name: string | null;
   email: string | null;
+  created: number;
 }
 
 interface IssuedToken {
   scope: string;
   stripeUserId: string;
   stripeCustomers: Map<string, StripeCustomerRecord>;
+  billingEntities: Record<BillingEntity, Map<string, Record<string, unknown>>>;
+  generatedInvoices: GeneratedInvoices | null;
 }
+
+type BillingEntity = "prices" | "subscriptions" | "invoices" | "credit_notes" | "charges" | "refunds";
+
+interface GeneratedInvoices {
+  invoiceCount: number;
+  lineItemCount: number;
+  createdStart: number;
+  createdStepSeconds: number;
+}
+
+const BILLING_ENTITIES: BillingEntity[] = [
+  "prices", "subscriptions", "invoices", "credit_notes", "charges", "refunds",
+];
 
 interface LoggedExchange {
   method: string;
@@ -92,14 +108,17 @@ function listCustomers(
   email: string | null,
   startingAfter: string | null,
   limit: number,
-): { data: Array<{ id: string; object: string; name: string | null; email: string | null }>; has_more: boolean } {
+  createdGte: number | null = null,
+): { data: Array<{ id: string; object: string; name: string | null; email: string | null; created: number }>; has_more: boolean } {
   let rows = [...issued.stripeCustomers.entries()].map(([id, record]) => ({
     id,
     object: "customer",
     name: record.name,
     email: record.email,
+    created: record.created,
   }));
   if (email !== null) rows = rows.filter((row) => row.email === email);
+  if (createdGte !== null) rows = rows.filter((row) => row.created >= createdGte);
   if (startingAfter) {
     const index = rows.findIndex((row) => row.id === startingAfter);
     rows = index >= 0 ? rows.slice(index + 1) : [];
@@ -108,6 +127,63 @@ function listCustomers(
     data: rows.slice(0, limit),
     has_more: rows.length > limit,
   };
+}
+
+function listBillingEntities(
+  issued: IssuedToken,
+  entity: BillingEntity,
+  startingAfter: string | null,
+  limit: number,
+  createdGte: number | null,
+): { data: Record<string, unknown>[]; has_more: boolean } {
+  let rows: Record<string, unknown>[];
+  if (entity === "invoices" && issued.generatedInvoices) {
+    const generated = issued.generatedInvoices;
+    let start = startingAfter?.startsWith("in_generated_")
+      ? Number(startingAfter.slice("in_generated_".length)) + 1
+      : 0;
+    if (createdGte !== null && generated.createdStepSeconds > 0) {
+      start = Math.max(start, Math.ceil((createdGte - generated.createdStart) / generated.createdStepSeconds));
+    }
+    start = Math.max(0, start);
+    rows = [];
+    for (let index = start; index < Math.min(generated.invoiceCount, start + limit + 1); index += 1) {
+      const created = generated.createdStart + index * generated.createdStepSeconds;
+      if (createdGte !== null && created < createdGte) continue;
+      const baseLineCount = Math.floor(generated.lineItemCount / generated.invoiceCount);
+      const extra = index < generated.lineItemCount % generated.invoiceCount ? 1 : 0;
+      const lineCount = baseLineCount + extra;
+      rows.push({
+        id: `in_generated_${index}`,
+        customer: "cus_generated",
+        amount_due: (BigInt(lineCount) * 100n).toString(),
+        currency: "usd",
+        status: "paid",
+        created,
+        due_date: null,
+        lines: {
+          data: Array.from({ length: lineCount }, (_, lineIndex) => ({
+            id: `il_generated_${index}_${lineIndex}`,
+            price: "price_generated",
+            quantity: "1",
+            unit_amount: "100",
+            amount: "100",
+            currency: "usd",
+          })),
+        },
+      });
+    }
+  } else {
+    rows = [...issued.billingEntities[entity].values()];
+    if (startingAfter) {
+      const index = rows.findIndex((row) => row.id === startingAfter);
+      rows = index >= 0 ? rows.slice(index + 1) : [];
+    }
+    if (createdGte !== null) {
+      rows = rows.filter((row) => typeof row.created !== "number" || row.created >= createdGte);
+    }
+  }
+  return { data: rows.slice(0, limit), has_more: rows.length > limit };
 }
 
 const port = Number(process.env.FAKE_STRIPE_PORT ?? 8092);
@@ -146,17 +222,75 @@ const server = createServer(async (req, res) => {
       const seeded: string[] = [];
       for (const row of payload.customers) {
         if (typeof row !== "object" || row === null) continue;
-        const record = row as { id?: unknown; name?: unknown; email?: unknown };
+        const record = row as { id?: unknown; name?: unknown; email?: unknown; created?: unknown };
         const id = typeof record.id === "string" && record.id.length > 0
           ? record.id
           : `cus_seed_${letters(14)}`;
         issued.stripeCustomers.set(id, {
           name: typeof record.name === "string" ? record.name : null,
           email: typeof record.email === "string" ? record.email : null,
+          created: typeof record.created === "number" ? record.created : Math.floor(Date.now() / 1_000),
         });
         seeded.push(id);
       }
       finish(res, 200, JSON.stringify({ seeded: seeded.length, ids: seeded }), "application/json");
+      return;
+    }
+    const seedEntity = BILLING_ENTITIES.find((entity) => path === `/_seed/${entity}`);
+    if (req.method === "POST" && seedEntity) {
+      const requestBody = await readBody(req);
+      let payload: {
+        access_token?: unknown;
+        records?: unknown;
+        generated?: unknown;
+        [key: string]: unknown;
+      } = {};
+      try {
+        payload = JSON.parse(requestBody) as typeof payload;
+      } catch {
+        finish(res, 400, JSON.stringify({ error: "invalid json" }), "application/json");
+        return;
+      }
+      if (typeof payload.access_token !== "string" || !issuedTokens.has(payload.access_token)) {
+        finish(res, 400, JSON.stringify({ error: "unknown access_token" }), "application/json");
+        return;
+      }
+      const issued = issuedTokens.get(payload.access_token)!;
+      const records = Array.isArray(payload.records)
+        ? payload.records
+        : Array.isArray(payload[seedEntity]) ? payload[seedEntity] as unknown[] : [];
+      let seeded = 0;
+      for (const value of records) {
+        if (!value || typeof value !== "object") continue;
+        const record = value as Record<string, unknown>;
+        if (typeof record.id !== "string" || record.id.length === 0) continue;
+        issued.billingEntities[seedEntity].set(record.id, record);
+        seeded += 1;
+      }
+      if (seedEntity === "invoices" && payload.generated && typeof payload.generated === "object") {
+        const generated = payload.generated as Record<string, unknown>;
+        const invoiceCount = Number(generated.invoice_count);
+        const lineItemCount = Number(generated.line_item_count);
+        const createdStart = Number(generated.created_start);
+        const createdStepSeconds = Number(generated.created_step_seconds ?? 1);
+        if (![invoiceCount, lineItemCount, createdStart, createdStepSeconds].every(Number.isFinite)
+          || !Number.isInteger(invoiceCount) || !Number.isInteger(lineItemCount)
+          || !Number.isInteger(createdStart) || !Number.isInteger(createdStepSeconds)
+          || invoiceCount < 1 || lineItemCount < 0 || createdStepSeconds < 0) {
+          finish(res, 400, JSON.stringify({ error: "invalid generated invoice configuration" }), "application/json");
+          return;
+        }
+        issued.generatedInvoices = { invoiceCount, lineItemCount, createdStart, createdStepSeconds };
+        seeded += invoiceCount;
+      }
+      finish(res, 200, JSON.stringify({ seeded }), "application/json");
+      return;
+    }
+    if (req.method === "POST" && path === "/_revoke") {
+      const requestBody = await readBody(req);
+      const payload = JSON.parse(requestBody) as { access_token?: unknown };
+      if (typeof payload.access_token === "string") issuedTokens.delete(payload.access_token);
+      finish(res, 200, JSON.stringify({ revoked: true }), "application/json");
       return;
     }
 
@@ -203,6 +337,8 @@ const server = createServer(async (req, res) => {
           scope: issued.scope,
           stripeUserId: issued.stripeUserId,
           stripeCustomers: new Map(),
+          billingEntities: Object.fromEntries(BILLING_ENTITIES.map((entity) => [entity, new Map()])) as Record<BillingEntity, Map<string, Record<string, unknown>>>,
+          generatedInvoices: null,
         });
         responseStatus = 200;
         responseBody = JSON.stringify({
@@ -227,6 +363,9 @@ const server = createServer(async (req, res) => {
           url.searchParams.get("email"),
           url.searchParams.get("starting_after"),
           limit,
+          url.searchParams.get("created[gte]") === null
+            ? null
+            : Number(url.searchParams.get("created[gte]")),
         );
         responseStatus = 200;
         responseBody = JSON.stringify({
@@ -248,13 +387,42 @@ const server = createServer(async (req, res) => {
       } else {
         const fields = parseCustomerFields(requestBody, String(req.headers["content-type"] ?? ""));
         const id = `cus_${letters(14)}`;
-        issued.stripeCustomers.set(id, { name: fields.name, email: fields.email });
+        const created = Math.floor(Date.now() / 1_000);
+        issued.stripeCustomers.set(id, { name: fields.name, email: fields.email, created });
         responseStatus = 200;
         responseBody = JSON.stringify({
           id,
           object: "customer",
           name: fields.name,
           email: fields.email,
+          created,
+        });
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "GET" && BILLING_ENTITIES.some((entity) => path === `/v1/${entity}`)) {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else {
+        const entity = BILLING_ENTITIES.find((candidate) => path === `/v1/${candidate}`)!;
+        const limitRaw = Number(url.searchParams.get("limit") ?? 100);
+        const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 100;
+        const createdRaw = url.searchParams.get("created[gte]");
+        const createdGte = createdRaw === null ? null : Number(createdRaw);
+        const listed = listBillingEntities(
+          issued,
+          entity,
+          url.searchParams.get("starting_after"),
+          limit,
+          createdGte !== null && Number.isFinite(createdGte) ? createdGte : null,
+        );
+        responseStatus = 200;
+        responseBody = JSON.stringify({
+          object: "list",
+          url: `/v1/${entity}`,
+          has_more: listed.has_more,
+          data: listed.data,
         });
       }
       finish(res, responseStatus, responseBody, "application/json");
@@ -274,7 +442,12 @@ const server = createServer(async (req, res) => {
       query: url.search,
       requestBody,
       responseStatus,
-      responseBody,
+      // Scale fixtures can return tens of thousands of generated lines per
+      // page. Keep request attribution without retaining the whole 2M-line
+      // dataset in the debug log after each response has been sent.
+      responseBody: responseBody.length > 100_000
+        ? JSON.stringify({ truncated: true, characters: responseBody.length })
+        : responseBody,
     });
   } catch (err) {
     if (!res.headersSent) {

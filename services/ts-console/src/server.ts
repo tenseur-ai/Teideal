@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import multipart from "@fastify/multipart";
 import { pathToFileURL } from "node:url";
 import { createPool } from "./lib/db.js";
 import { requireAuth } from "./lib/auth.js";
@@ -35,6 +36,12 @@ import { registerTimelineRoutes } from "./routes/timeline.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerPeriodCloseRoutes } from "./routes/periodClose.js";
 import { registerConnectorRoutes } from "./routes/connectors.js";
+import {
+  backfillTick,
+  connectorBackfillTickIntervalMs,
+  connectorIncrementalIntervalMs,
+  incrementalTick,
+} from "./lib/connectors/syncWorker.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -57,6 +64,9 @@ export function buildServer(options: BuildServerOptions = {}) {
   // second gives retired paths an actionable 410 before normal routing.
   if (options.onRoute) app.addHook("onRoute", options.onRoute);
   app.addHook("onRequest", rejectDeprecatedRoute);
+  app.register(multipart, {
+    limits: { files: 1, fileSize: 100 * 1024 * 1024 },
+  });
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
@@ -102,6 +112,10 @@ export function buildServer(options: BuildServerOptions = {}) {
   let commitTimer: NodeJS.Timeout | undefined;
   let balanceAlertTimer: NodeJS.Timeout | undefined;
   let webhookDeliveryTimer: NodeJS.Timeout | undefined;
+  let connectorBackfillTimer: NodeJS.Timeout | undefined;
+  let connectorIncrementalTimer: NodeJS.Timeout | undefined;
+  let connectorBackfillRunning = false;
+  let connectorIncrementalRunning = false;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -130,6 +144,21 @@ export function buildServer(options: BuildServerOptions = {}) {
       webhookDeliveryTimer = setInterval(() => {
         evaluateWebhookRetries(pool).catch((err) => console.error("webhook delivery worker failed:", err));
       }, webhookDeliveryIntervalMs());
+      // Tests call both connector ticks directly with a fixed instant.
+      connectorBackfillTimer = setInterval(() => {
+        if (connectorBackfillRunning) return;
+        connectorBackfillRunning = true;
+        backfillTick(pool)
+          .catch((err) => console.error("connector backfill worker failed:", err))
+          .finally(() => { connectorBackfillRunning = false; });
+      }, connectorBackfillTickIntervalMs());
+      connectorIncrementalTimer = setInterval(() => {
+        if (connectorIncrementalRunning) return;
+        connectorIncrementalRunning = true;
+        incrementalTick(pool)
+          .catch((err) => console.error("connector incremental worker failed:", err))
+          .finally(() => { connectorIncrementalRunning = false; });
+      }, connectorIncrementalIntervalMs());
     }
   }
 
@@ -140,6 +169,8 @@ export function buildServer(options: BuildServerOptions = {}) {
     if (commitTimer) clearInterval(commitTimer);
     if (balanceAlertTimer) clearInterval(balanceAlertTimer);
     if (webhookDeliveryTimer) clearInterval(webhookDeliveryTimer);
+    if (connectorBackfillTimer) clearInterval(connectorBackfillTimer);
+    if (connectorIncrementalTimer) clearInterval(connectorIncrementalTimer);
     await pool.end();
   });
 

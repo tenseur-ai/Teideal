@@ -1,5 +1,6 @@
 import type { Pool } from "pg";
 import { withTenant } from "../db.js";
+import { ConnectorError } from "./connector.js";
 
 export interface SyncWatermarkPosition {
   since: string | null;
@@ -24,10 +25,62 @@ export interface ConnectorSyncHealth {
   last_sync_status: "running" | "succeeded" | "failed" | null;
   consecutive_failures: number;
   cursor_high_water: SyncWatermark;
+  backfill_completed_at: string | null;
+  last_error: string | null;
 }
 
-interface SyncHealthRow extends Omit<ConnectorSyncHealth, "last_sync_at"> {
+interface SyncHealthRow extends Omit<ConnectorSyncHealth, "last_sync_at" | "backfill_completed_at" | "last_error"> {
   last_sync_at: Date | string | null;
+  backfill_completed_at: Date | string | null;
+  raw_last_error: string | null;
+}
+
+/**
+ * Checkpoints one fully persisted page. This is deliberately independent of
+ * completeSync: a failed multi-hour attempt remains failed, while its durable
+ * page-level progress can still be resumed by the next attempt.
+ */
+export async function advanceWatermark(
+  pool: Pool,
+  tenantId: string,
+  connectorId: string,
+  entityType: string,
+  position: SyncWatermarkPosition,
+): Promise<void> {
+  await withTenant(pool, tenantId, async (client) => {
+    const result = await client.query(
+      `UPDATE connectors
+       SET cursor_high_water = jsonb_set(
+             cursor_high_water,
+             ARRAY[$3]::text[],
+             $4::jsonb,
+             true
+           ),
+           updated_at = now()
+       WHERE id = $1 AND tenant_id = $2`,
+      [connectorId, tenantId, entityType, JSON.stringify(position)],
+    );
+    if (result.rowCount !== 1) throw new Error("connector not found");
+  });
+}
+
+export function humanizeConnectorError(rawMessage: string | ConnectorError): string {
+  const statusCode = rawMessage instanceof ConnectorError ? rawMessage.statusCode : null;
+  const message = rawMessage instanceof Error ? rawMessage.message : rawMessage;
+  const normalized = message.toLowerCase();
+  if (statusCode === 0 || statusCode === 408 || /network|timed? out|timeout|econn|socket|fetch failed/.test(normalized)) {
+    return "The billing system could not be reached. Check the connection and try again.";
+  }
+  if (statusCode === 401 || statusCode === 403 || /http (401|403)|unauthori[sz]ed|forbidden/.test(normalized)) {
+    return "The billing system authorization is no longer valid. Reconnect it and try again.";
+  }
+  if (statusCode === 429 || /http 429|rate.?limit/.test(normalized)) {
+    return "The billing system is temporarily rate-limiting requests. Teideal will try again.";
+  }
+  if ((statusCode !== null && statusCode >= 500) || /http 5\d\d|upstream/.test(normalized)) {
+    return "The billing system is temporarily unavailable. Teideal will try again.";
+  }
+  return "The last sync failed. Contact support if this persists.";
 }
 
 export async function startSync(pool: Pool, tenantId: string, connectorId: string): Promise<string> {
@@ -97,25 +150,45 @@ export async function getSyncHealth(pool: Pool, tenantId: string): Promise<Conne
   return withTenant(pool, tenantId, async (client) => {
     const { rows } = await client.query<SyncHealthRow>(
       `SELECT c.id AS connector_id, c.connector_type, c.display_name, c.status,
-              latest.started_at AS last_sync_at,
+              COALESCE(last_success.completed_at, latest.started_at) AS last_sync_at,
               latest.status AS last_sync_status,
               c.consecutive_failures,
-              c.cursor_high_water
+              c.cursor_high_water,
+              c.backfill_completed_at,
+              CASE WHEN latest.status = 'failed' THEN latest.error_message ELSE NULL END AS raw_last_error
        FROM connectors c
        LEFT JOIN (
          SELECT DISTINCT ON (connector_id)
-                connector_id, started_at, status
+                connector_id, started_at, status, error_message
          FROM connector_syncs
          WHERE tenant_id = $1
          ORDER BY connector_id, started_at DESC
        ) latest ON latest.connector_id = c.id
+       LEFT JOIN (
+         SELECT connector_id, max(completed_at) AS completed_at
+         FROM connector_syncs
+         WHERE tenant_id = $1 AND status = 'succeeded'
+         GROUP BY connector_id
+       ) last_success ON last_success.connector_id = c.id
        WHERE c.tenant_id = $1
        ORDER BY c.display_name, c.id`,
       [tenantId],
     );
     return rows.map((row) => ({
-      ...row,
+      connector_id: row.connector_id,
+      connector_type: row.connector_type,
+      display_name: row.display_name,
+      status: row.status,
       last_sync_at: row.last_sync_at === null ? null : new Date(row.last_sync_at).toISOString(),
+      last_sync_status: row.last_sync_status,
+      consecutive_failures: row.consecutive_failures,
+      cursor_high_water: row.cursor_high_water,
+      backfill_completed_at: row.backfill_completed_at === null
+        ? null
+        : new Date(row.backfill_completed_at).toISOString(),
+      last_error: row.raw_last_error === null
+        ? null
+        : `${row.display_name}: ${humanizeConnectorError(row.raw_last_error)}`,
     }));
   });
 }
