@@ -255,4 +255,168 @@ describe("TEID-68 discrepancy report", () => {
     expect(row.classification).not.toBe("missing_line");
     expect(row.evidence.coverage_gaps.reasons).toEqual(["credit_payment_refund_not_mapped"]);
   });
+
+  it("TEID-68.1-T1 includes a billed line whose period is inside the report window", async () => {
+    const seeded = await seedMappedCase({ suffix: "t68-1-t1", billedAmount: "340.00" });
+    await superPool.query(
+      `UPDATE verify_billed_lines
+       SET period_start = '2026-08-05T00:00:00Z', period_end = '2026-08-25T00:00:00Z'
+       WHERE tenant_id = $1 AND stripe_invoice_line_id = $2`,
+      [TENANT_ID, seeded.lineId],
+    );
+
+    const response = await report();
+    expect(response.status).toBe(200);
+    const row = rowFor(response.body, seeded.customerId);
+    expect(row).toMatchObject({
+      expected_total: "425.00",
+      billed_total: "340.00",
+      delta: "85.00",
+      classification: "rate_drift",
+    });
+    expect(row.classification).not.toBe("missing_line");
+    expect(row.evidence.billed.lines.map((line) => line.stripe_invoice_line_id)).toEqual([seeded.lineId]);
+  });
+
+  it("TEID-68.1-T2 excludes billed lines wholly before or after the report window", async () => {
+    const before = await seedMappedCase({ suffix: "t68-1-t2-before" });
+    const after = await seedMappedCase({ suffix: "t68-1-t2-after" });
+    await Promise.all([
+      superPool.query(
+        `UPDATE verify_billed_lines
+         SET period_start = '2026-07-01T00:00:00Z', period_end = '2026-08-01T00:00:00Z'
+         WHERE tenant_id = $1 AND stripe_invoice_line_id = $2`,
+        [TENANT_ID, before.lineId],
+      ),
+      superPool.query(
+        `UPDATE verify_billed_lines
+         SET period_start = '2026-09-01T00:00:00Z', period_end = '2026-10-01T00:00:00Z'
+         WHERE tenant_id = $1 AND stripe_invoice_line_id = $2`,
+        [TENANT_ID, after.lineId],
+      ),
+    ]);
+
+    const response = await report();
+    expect(response.status).toBe(200);
+    for (const customerId of [before.customerId, after.customerId]) {
+      expect(rowFor(response.body, customerId)).toMatchObject({
+        billed_total: "0.00",
+        delta: "425.00",
+        classification: "missing_line",
+        evidence: { billed: { line_count: "0", lines: [] } },
+      });
+    }
+  });
+
+  it("TEID-68.1-T3 keeps a billed-line discrepancy classified when a refund also exists", async () => {
+    const seeded = await seedMappedCase({ suffix: "t68-1-t3", billedAmount: "340.00" });
+    const paymentId = `py_t68_1_t3_${randomUUID()}`;
+    await seedRecord(fixture, "payment", paymentId, {
+      id: paymentId,
+      customer_id: seeded.stripeCustomerId,
+      invoice_id: seeded.invoiceId,
+      amount: "340.00",
+      currency: "USD",
+      status: "succeeded",
+      paid_at: "2026-08-20T00:00:00.000Z",
+      passthrough: {},
+    });
+    const refundId = `re_t68_1_t3_${randomUUID()}`;
+    await seedRecord(fixture, "refund", refundId, {
+      id: refundId,
+      payment_id: paymentId,
+      amount: "25.00",
+      currency: "USD",
+      reason: "requested_by_customer",
+      refunded_at: "2026-08-21T00:00:00.000Z",
+      passthrough: {},
+    });
+
+    const response = await report();
+    expect(response.status).toBe(200);
+    const row = rowFor(response.body, seeded.customerId);
+    expect(row).toMatchObject({
+      billed_total: "340.00",
+      delta: "85.00",
+      classification: "rate_drift",
+    });
+    expect(row.classification).not.toBe("known_coverage_gap");
+    expect(row.evidence.coverage_gaps.reasons).toEqual(["credit_payment_refund_not_mapped"]);
+  });
+
+  it("TEID-68.1-T4 keeps credit-only activity classified as a known coverage gap", async () => {
+    const customerId = await createCustomer(fixture, "t68-1-t4");
+    const stripeCustomerId = `cus_t68_1_t4_${randomUUID()}`;
+    await linkCustomer(customerId, stripeCustomerId);
+    await seedExpectedActivity(customerId, `${fixture.marker}-t68-1-t4`, "425.00", "100");
+    const creditId = `cn_t68_1_t4_${randomUUID()}`;
+    await seedRecord(fixture, "credit", creditId, {
+      id: creditId,
+      customer_id: stripeCustomerId,
+      amount: "25.00",
+      currency: "USD",
+      reason: "adjustment",
+      issued_at: "2026-08-20T00:00:00.000Z",
+      passthrough: {},
+    });
+
+    const response = await report();
+    expect(response.status).toBe(200);
+    const row = rowFor(response.body, customerId);
+    expect(row).toMatchObject({
+      expected_total: "425.00",
+      billed_total: "0.00",
+      delta: "425.00",
+      classification: "known_coverage_gap",
+      evidence: { billed: { line_count: "0", lines: [] } },
+    });
+    expect(row.classification).not.toBe("missing_line");
+    expect(row.evidence.coverage_gaps.reasons).toEqual(["credit_payment_refund_not_mapped"]);
+  });
+
+  it("TEID-68.1-T5 counts an unmapped customer's invoice line whose period overlaps, not equals, the report window", async () => {
+    const stripeCustomerId = `cus_unmapped_overlap_${randomUUID()}`;
+    const invoiceId = `in_unmapped_overlap_${randomUUID()}`;
+    const lineId = `il_unmapped_overlap_${randomUUID()}`;
+    await seedRecord(fixture, "customer", stripeCustomerId, {
+      id: stripeCustomerId,
+      name: "Unmapped Overlap Customer",
+      email: "unmapped-overlap-verify@example.test",
+      passthrough: {},
+    });
+    await seedRecord(fixture, "invoice", invoiceId, {
+      id: invoiceId,
+      customer_id: stripeCustomerId,
+      amount: "49.99",
+      currency: "USD",
+      status: "open",
+      issued_at: "2026-08-20T00:00:00.000Z",
+      period_start: "2026-08-01T00:00:00.000Z",
+      period_end: "2026-09-01T00:00:00.000Z",
+      lines: [{
+        id: lineId,
+        invoice_id: invoiceId,
+        price_id: "price_verify",
+        // Inside, not equal to, the 2026-08 report window -- the same
+        // real-Stripe-subscription-cycle shape TEID-68.1-T1 proves for
+        // mapped customers, exercised here for the unmapped/excluded path.
+        period_start: "2026-08-05T00:00:00.000Z",
+        period_end: "2026-08-25T00:00:00.000Z",
+        quantity: "1",
+        amount: "49.99",
+        currency: "USD",
+        passthrough: {},
+      }],
+      passthrough: {},
+    });
+    expect((await runMapper()).status).toBe(200);
+
+    const response = await report();
+    expect(response.status).toBe(200);
+    expect(response.body.excluded).toContainEqual(expect.objectContaining({
+      customer_id: stripeCustomerId,
+      reason: "unmapped_customer",
+      billed_total: "49.99",
+    }));
+  });
 });
