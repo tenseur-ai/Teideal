@@ -24,7 +24,7 @@ interface MappingResponse {
 interface TestLine {
   id: string;
   invoice_id: string;
-  price_id: string;
+  price_id: string | null;
   period_start: string | null;
   period_end: string | null;
   quantity: string;
@@ -327,5 +327,26 @@ describe("TEID-66 billed-line mapping", () => {
     const normalRow = await billedRows(["il_t9_normal"]);
     expect(normalRow).toHaveLength(1);
     expect(normalRow[0].amount).toBe("15.00");
+  });
+
+  it("TEID-66-T10 skips a priceless line without failing the rest of the tenant's mapping", async () => {
+    const customerId = await createCustomer(fixture, "t10-customer");
+    await linkCustomer(customerId, "cus_t10");
+    const pricelessLine = {
+      ...line("il_t10_oneoff", "in_t10", "price_t10_oneoff", "1", "5.00"),
+      price_id: null,
+    };
+    await seedRecord(fixture, "invoice", "in_t10", invoice("in_t10", "cus_t10", [
+      pricelessLine,
+      line("il_t10_normal", "in_t10", "price_t10_normal", "1", "25.00"),
+    ]));
+
+    const response = await runMapper();
+    expect(response.status).toBe(200);
+    expect(response.body.mapped_lines).toBe(1);
+    expect(await billedRows(["il_t10_oneoff"])).toHaveLength(0);
+    const normalRow = await billedRows(["il_t10_normal"]);
+    expect(normalRow).toHaveLength(1);
+    expect(normalRow[0].amount).toBe("25.00");
   });
 });

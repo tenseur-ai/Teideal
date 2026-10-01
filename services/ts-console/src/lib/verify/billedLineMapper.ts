@@ -98,9 +98,13 @@ export async function mapBilledLines(
            -- requires both (it exists to compare against a period's expected
            -- revenue, which a periodless line can't be), so such a line is
            -- excluded here rather than failing this entire INSERT for every
-           -- other line in the tenant's data.
+           -- other line in the tenant's data. The same applies to a null
+           -- price_id (ConnectorInvoiceLine permits it -- a Stripe line can
+           -- be an ad-hoc amount with no attached Price object at all):
+           -- verify_billed_lines requires it too, for the same reason.
            AND line.period_start IS NOT NULL
            AND line.period_end IS NOT NULL
+           AND line.price_id IS NOT NULL
        )
        INSERT INTO verify_billed_lines (
          tenant_id, customer_id, connector_id, stripe_invoice_line_id,
