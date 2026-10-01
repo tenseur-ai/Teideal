@@ -286,7 +286,14 @@ describe("TEID-74 processor-neutral ledger", () => {
          AND c2.column_name ILIKE '%stripe%'
        ORDER BY c1.table_name`,
     );
-    expect(referenceTables.rows.map((row) => row.table_name)).toEqual(["stripe_customer_links"]);
+    // period_close_invoice_line_items (TEID-39) stores stripe_invoice_item_id
+    // the same way stripe_customer_links stores stripe_customer_id -- a
+    // non-primary-key reference column, never the row's own identity. This
+    // allowlist is of known-safe reference tables, not a rule against a
+    // second one existing.
+    expect(referenceTables.rows.map((row) => row.table_name)).toEqual(
+      ["period_close_invoice_line_items", "stripe_customer_links"],
+    );
 
     // information_schema.constraint_column_usage is empty for teideal_app
     // (it only lists constraints owned by the current user). pg_catalog is

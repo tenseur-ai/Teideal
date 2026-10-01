@@ -43,6 +43,10 @@ import {
   connectorIncrementalIntervalMs,
   incrementalTick,
 } from "./lib/connectors/syncWorker.js";
+import {
+  periodCloseInvoiceSyncIntervalMs,
+  runPeriodCloseInvoiceSyncTick,
+} from "./lib/periodCloseInvoiceSync.js";
 
 const SESSION_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const EXPORT_WORKER_INTERVAL_MS = 60 * 1000;
@@ -118,6 +122,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   let connectorIncrementalTimer: NodeJS.Timeout | undefined;
   let connectorBackfillRunning = false;
   let connectorIncrementalRunning = false;
+  let periodCloseInvoiceSyncTimer: NodeJS.Timeout | undefined;
   if (process.env.NODE_ENV !== "test") {
     sweepTimer = setInterval(() => {
       sweepExpiredSessions(pool).catch((err) => console.error("session sweep failed:", err));
@@ -161,6 +166,9 @@ export function buildServer(options: BuildServerOptions = {}) {
           .catch((err) => console.error("connector incremental worker failed:", err))
           .finally(() => { connectorIncrementalRunning = false; });
       }, connectorIncrementalIntervalMs());
+      periodCloseInvoiceSyncTimer = setInterval(() => {
+        runPeriodCloseInvoiceSyncTick(pool).catch((err) => console.error("period-close invoice sync worker failed:", err));
+      }, periodCloseInvoiceSyncIntervalMs());
     }
   }
 
@@ -173,6 +181,7 @@ export function buildServer(options: BuildServerOptions = {}) {
     if (webhookDeliveryTimer) clearInterval(webhookDeliveryTimer);
     if (connectorBackfillTimer) clearInterval(connectorBackfillTimer);
     if (connectorIncrementalTimer) clearInterval(connectorIncrementalTimer);
+    if (periodCloseInvoiceSyncTimer) clearInterval(periodCloseInvoiceSyncTimer);
     await pool.end();
   });
 

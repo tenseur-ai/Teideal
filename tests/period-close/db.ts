@@ -183,6 +183,9 @@ export async function cleanupMarker(tenantId: string, marker: string): Promise<v
     await client.query(`DELETE FROM grant_ledger_entries WHERE grant_id IN (SELECT id FROM grants WHERE customer_id = ANY($1::uuid[]))`, [ids]);
     await client.query(`DELETE FROM grants WHERE customer_id = ANY($1::uuid[])`, [ids]);
     await client.query(`DELETE FROM customer_billing_config WHERE customer_id = ANY($1::uuid[])`, [ids]);
+    await client.query(`DELETE FROM period_close_invoice_line_items WHERE customer_id = ANY($1::uuid[])`, [ids]);
+    await client.query(`DELETE FROM period_close_invoice_sync_attempts WHERE customer_id = ANY($1::uuid[])`, [ids]);
+    await client.query(`DELETE FROM stripe_customer_links WHERE customer_id = ANY($1::uuid[])`, [ids]);
     await client.query(`DELETE FROM customers WHERE id = ANY($1::uuid[])`, [ids]);
   } finally {
     await client.query("SET session_replication_role = DEFAULT").catch(() => undefined);

@@ -18,12 +18,21 @@ interface StripeCustomerRecord {
   created: number;
 }
 
+interface StripeInvoiceItemRecord {
+  customer: string;
+  amount: string;
+  currency: string;
+  description: string | null;
+  metadata: Record<string, string>;
+}
+
 interface IssuedToken {
   scope: string;
   stripeUserId: string;
   stripeCustomers: Map<string, StripeCustomerRecord>;
   billingEntities: Record<BillingEntity, Map<string, Record<string, unknown>>>;
   generatedInvoices: GeneratedInvoices | null;
+  invoiceItems: Map<string, StripeInvoiceItemRecord>;
 }
 
 type BillingEntity = "prices" | "subscriptions" | "invoices" | "credit_notes" | "charges" | "refunds";
@@ -46,12 +55,19 @@ interface LoggedExchange {
   requestBody: string;
   responseStatus: number;
   responseBody: string;
+  receivedAt: number;
+}
+
+interface InvoiceItemFailure {
+  remaining: number | "forever";
+  status: number;
 }
 
 const pending = new Map<string, IssuedCode>();
 const consumed = new Set<string>();
 const issuedTokens = new Map<string, IssuedToken>();
 const requests: LoggedExchange[] = [];
+let invoiceItemFailure: InvoiceItemFailure | null = null;
 
 function letters(count: number): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz";
@@ -293,6 +309,60 @@ const server = createServer(async (req, res) => {
       finish(res, 200, JSON.stringify({ revoked: true }), "application/json");
       return;
     }
+    if (req.method === "POST" && path === "/_reset") {
+      requests.length = 0;
+      invoiceItemFailure = null;
+      finish(res, 200, JSON.stringify({ reset: true }), "application/json");
+      return;
+    }
+    if (req.method === "POST" && path === "/_configure") {
+      const requestBody = await readBody(req);
+      let payload: { invoiceitems?: unknown } = {};
+      try {
+        payload = JSON.parse(requestBody) as { invoiceitems?: unknown };
+      } catch {
+        finish(res, 400, JSON.stringify({ error: "invalid json" }), "application/json");
+        return;
+      }
+      const config = payload.invoiceitems;
+      if (config === undefined || config === null) {
+        invoiceItemFailure = null;
+        finish(res, 200, JSON.stringify({ invoiceitems: { failureMode: "none" } }), "application/json");
+        return;
+      }
+      if (typeof config !== "object") {
+        finish(res, 400, JSON.stringify({ error: "invalid failure configuration" }), "application/json");
+        return;
+      }
+      const row = config as { failureMode?: unknown; status?: unknown; failCount?: unknown };
+      if (row.failureMode === "none" || row.failureMode === undefined) {
+        invoiceItemFailure = null;
+      } else if (row.failureMode === "persistent_5xx") {
+        const status = row.status === undefined ? 503 : row.status;
+        if (typeof status !== "number" || !Number.isInteger(status) || status < 500) {
+          finish(res, 400, JSON.stringify({ error: "status must be a 5xx integer" }), "application/json");
+          return;
+        }
+        let remaining: number | "forever" = "forever";
+        if (row.failCount !== undefined) {
+          if (typeof row.failCount !== "number" || !Number.isInteger(row.failCount) || row.failCount < 0) {
+            finish(res, 400, JSON.stringify({ error: "failCount must be a non-negative integer" }), "application/json");
+            return;
+          }
+          remaining = row.failCount;
+        }
+        invoiceItemFailure = { remaining, status };
+      } else {
+        finish(res, 400, JSON.stringify({ error: "invalid failureMode" }), "application/json");
+        return;
+      }
+      finish(res, 200, JSON.stringify({
+        invoiceitems: invoiceItemFailure === null
+          ? { failureMode: "none" }
+          : { failureMode: "persistent_5xx", status: invoiceItemFailure.status, remaining: invoiceItemFailure.remaining },
+      }), "application/json");
+      return;
+    }
 
     const requestBody = req.method === "GET" || req.method === "HEAD" ? "" : await readBody(req);
     let responseStatus = 404;
@@ -339,6 +409,7 @@ const server = createServer(async (req, res) => {
           stripeCustomers: new Map(),
           billingEntities: Object.fromEntries(BILLING_ENTITIES.map((entity) => [entity, new Map()])) as Record<BillingEntity, Map<string, Record<string, unknown>>>,
           generatedInvoices: null,
+          invoiceItems: new Map(),
         });
         responseStatus = 200;
         responseBody = JSON.stringify({
@@ -426,6 +497,48 @@ const server = createServer(async (req, res) => {
         });
       }
       finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "POST" && path === "/v1/invoiceitems") {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else if (issued.scope === "read_only") {
+        responseStatus = 403;
+        responseBody = JSON.stringify({ error: "read_only" });
+      } else if (invoiceItemFailure && invoiceItemFailure.remaining !== 0) {
+        responseStatus = invoiceItemFailure.status;
+        responseBody = JSON.stringify({ error: "simulated upstream failure" });
+        if (invoiceItemFailure.remaining !== "forever") invoiceItemFailure.remaining -= 1;
+      } else {
+        const params = new URLSearchParams(requestBody);
+        const customer = params.get("customer") ?? "";
+        const amount = params.get("amount") ?? "";
+        const currency = params.get("currency") ?? "usd";
+        const description = params.get("description");
+        const metadata: Record<string, string> = {};
+        for (const [key, value] of params.entries()) {
+          const match = /^metadata\[([^\]]+)\]$/.exec(key);
+          if (match) metadata[match[1]] = value;
+        }
+        if (!customer || !amount) {
+          responseStatus = 400;
+          responseBody = JSON.stringify({ error: "customer and amount are required" });
+        } else {
+          const id = `ii_${letters(16)}`;
+          issued.invoiceItems.set(id, { customer, amount, currency, description, metadata });
+          responseStatus = 200;
+          responseBody = JSON.stringify({
+            id,
+            object: "invoiceitem",
+            customer,
+            amount,
+            currency,
+            description,
+            metadata,
+          });
+        }
+      }
+      finish(res, responseStatus, responseBody, "application/json");
     } else if (req.method === "POST" && path === "/oauth/deauthorize") {
       const params = new URLSearchParams(requestBody);
       responseStatus = 200;
@@ -448,6 +561,7 @@ const server = createServer(async (req, res) => {
       responseBody: responseBody.length > 100_000
         ? JSON.stringify({ truncated: true, characters: responseBody.length })
         : responseBody,
+      receivedAt: Date.now(),
     });
   } catch (err) {
     if (!res.headersSent) {

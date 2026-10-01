@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TEID-50 acceptance suite: live period-close aggregation, exports, scale, search, late adjustments, and zero activity.",
+  "description": "TEID-50/TEID-39 acceptance suite: period-close aggregation and Stripe invoice sync.",
   "scripts": {
     "test": "vitest run"
   },
