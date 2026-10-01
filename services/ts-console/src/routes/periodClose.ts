@@ -3,14 +3,20 @@ import type { Pool } from "pg";
 import { csvCell } from "../lib/exportFormats.js";
 import { GoUsageError } from "../lib/goUsageClient.js";
 import {
+  PeriodCloseInvoiceSyncError,
+  syncPeriodCloseInvoice,
+} from "../lib/periodCloseInvoiceSync.js";
+import {
   generatePeriodCloseSummary,
   type PeriodCloseSort,
   type PeriodCloseSummaryRow,
 } from "../lib/periodCloseSummary.js";
 import { consoleRoute } from "../lib/roleGuard.js";
 import { requireSession } from "../lib/sessionAuth.js";
+import { StripeConnectionClosedError, StripeScopeError } from "../lib/stripeConnect.js";
 
 const PERIOD_RE = /^(\d{4})-(0[1-9]|1[0-2])$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
 const PERIOD_CLOSE_ROLES = ["Owner", "Billing Admin", "Finance"] as const;
@@ -198,6 +204,45 @@ export function registerPeriodCloseRoutes(app: FastifyInstance, pool: Pool): voi
         if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
           return reply.code(504).send({ error: "usage service request timed out" });
         }
+        throw error;
+      }
+    });
+
+    consoleRoute(scoped, "post", "/period-close/:customerId/stripe-sync", { role: [...PERIOD_CLOSE_ROLES] }, async (req, reply) => {
+      const customerId = (req.params as { customerId: string }).customerId;
+      if (!UUID_RE.test(customerId)) return reply.code(400).send({ error: "customerId must be a UUID" });
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof body.period_start !== "string" || Number.isNaN(Date.parse(body.period_start))) {
+        return reply.code(400).send({ error: "period_start must be an RFC3339 timestamp" });
+      }
+      if (typeof body.period_end !== "string" || Number.isNaN(Date.parse(body.period_end))) {
+        return reply.code(400).send({ error: "period_end must be an RFC3339 timestamp" });
+      }
+      if (Date.parse(body.period_start) >= Date.parse(body.period_end)) {
+        return reply.code(400).send({ error: "period_start must be before period_end" });
+      }
+      try {
+        const result = await syncPeriodCloseInvoice({
+          pool,
+          tenantId: req.consolePrincipal!.tenantId,
+          customerId,
+          periodStart: new Date(body.period_start).toISOString(),
+          periodEnd: new Date(body.period_end).toISOString(),
+        });
+        if (result.alreadySynced) {
+          return reply.code(200).send({ data: result.lineItems });
+        }
+        return reply.code(202).send({
+          attempt_id: result.attemptId,
+          status: result.status,
+          error_message: result.errorMessage,
+        });
+      } catch (error) {
+        if (error instanceof PeriodCloseInvoiceSyncError) {
+          return reply.code(error.statusCode).send({ error: error.message });
+        }
+        if (error instanceof StripeScopeError) return reply.code(403).send({ error: error.message });
+        if (error instanceof StripeConnectionClosedError) return reply.code(400).send({ error: error.message });
         throw error;
       }
     });

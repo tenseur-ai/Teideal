@@ -10,6 +10,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "reservation.overrun",
   "reconciliation.mismatch",
   "customer.suspended",
+  "period_close_sync.stalled",
 ] as const;
 
 export type WebhookEventType = typeof WEBHOOK_EVENT_TYPES[number];

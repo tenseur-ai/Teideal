@@ -290,6 +290,8 @@ describe("TEID-50 period close", () => {
       overage: "0",
       expired_credits: "0",
       adjustments: "0",
+      last_stripe_sync_status: null,
+      last_stripe_sync_error: null,
     });
   });
 });

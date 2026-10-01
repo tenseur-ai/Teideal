@@ -16,6 +16,11 @@ export interface ConnectorHttpResponse {
 
 export interface ConnectorHttpClient {
   get(path: string, headers?: Record<string, string>): Promise<ConnectorHttpResponse>;
+  post(path: string, body?: string | URLSearchParams, headers?: Record<string, string>): Promise<ConnectorHttpResponse>;
+}
+
+export function connectorBackoffDelayMs(attemptNumber: number, baseDelayMs: number, maxDelayMs: number): number {
+  return Math.min(baseDelayMs * 2 ** (attemptNumber - 1), maxDelayMs);
 }
 
 function positive(name: string, value: number): void {
@@ -87,24 +92,38 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
     }
   }
 
-  async function attempt(path: string, headers: Record<string, string> | undefined): Promise<ConnectorHttpResponse> {
+  async function execute(
+    method: "GET" | "POST",
+    path: string,
+    headers: Record<string, string> | undefined,
+    body?: string | URLSearchParams,
+  ): Promise<ConnectorHttpResponse> {
     await acquireToken();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const requestHeaders: Record<string, string> = { ...headers };
+    let requestBody: string | undefined;
+    if (method === "POST") {
+      requestBody = body instanceof URLSearchParams ? body.toString() : body;
+      if (requestHeaders["Content-Type"] === undefined && requestHeaders["content-type"] === undefined) {
+        requestHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    }
     try {
       const response = await fetch(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, {
-        method: "GET",
-        headers,
+        method,
+        headers: requestHeaders,
+        body: requestBody,
         signal: controller.signal,
       });
       const text = await response.text();
-      let body: unknown = text;
+      let payload: unknown = text;
       if (isJsonContentType(response.headers.get("content-type"))) {
         if (!text) {
-          body = null;
+          payload = null;
         } else {
           try {
-            body = JSON.parse(text) as unknown;
+            payload = JSON.parse(text) as unknown;
           } catch {
             throw new ConnectorError(
               `connector returned malformed JSON (HTTP ${response.status})`,
@@ -116,19 +135,19 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
       }
       if (response.status === 429 || response.status >= 500) {
         throw new ConnectorError(
-          `connector request failed with HTTP ${response.status}: ${failureDetail(body, response.statusText || "retryable upstream error")}`,
+          `connector request failed with HTTP ${response.status}: ${failureDetail(payload, response.statusText || "retryable upstream error")}`,
           response.status,
           true,
         );
       }
       if (response.status >= 400 && response.status < 500) {
         throw new ConnectorError(
-          `connector request failed with HTTP ${response.status}: ${failureDetail(body, response.statusText || "request rejected")}`,
+          `connector request failed with HTTP ${response.status}: ${failureDetail(payload, response.statusText || "request rejected")}`,
           response.status,
           false,
         );
       }
-      return { status: response.status, body };
+      return { status: response.status, body: payload };
     } catch (error) {
       if (error instanceof ConnectorError) throw error;
       const timedOut = controller.signal.aborted;
@@ -143,29 +162,37 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
     }
   }
 
-  return {
-    async get(path, headers) {
-      let lastError: ConnectorError | undefined;
-      for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
-        try {
-          return await attempt(path, headers);
-        } catch (error) {
-          const connectorError = error instanceof ConnectorError
-            ? error
-            : new ConnectorError(`connector request failed: ${String(error)}`, 0, true);
-          if (!connectorError.retryable) throw connectorError;
-          lastError = connectorError;
-          if (attemptNumber < maxAttempts) {
-            const delayMs = Math.min(baseDelayMs * 2 ** (attemptNumber - 1), maxDelayMs);
-            await sleep(delayMs);
-          }
+  async function withRetry(
+    run: () => Promise<ConnectorHttpResponse>,
+  ): Promise<ConnectorHttpResponse> {
+    let lastError: ConnectorError | undefined;
+    for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        const connectorError = error instanceof ConnectorError
+          ? error
+          : new ConnectorError(`connector request failed: ${String(error)}`, 0, true);
+        if (!connectorError.retryable) throw connectorError;
+        lastError = connectorError;
+        if (attemptNumber < maxAttempts) {
+          await sleep(connectorBackoffDelayMs(attemptNumber, baseDelayMs, maxDelayMs));
         }
       }
-      throw new ConnectorError(
-        `connector request failed after ${maxAttempts} attempts: ${lastError?.message ?? "unknown error"}`,
-        lastError?.statusCode ?? 0,
-        false,
-      );
+    }
+    throw new ConnectorError(
+      `connector request failed after ${maxAttempts} attempts: ${lastError?.message ?? "unknown error"}`,
+      lastError?.statusCode ?? 0,
+      false,
+    );
+  }
+
+  return {
+    get(path, headers) {
+      return withRetry(() => execute("GET", path, headers));
+    },
+    post(path, body, headers) {
+      return withRetry(() => execute("POST", path, headers, body));
     },
   };
 }
