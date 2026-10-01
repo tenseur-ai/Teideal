@@ -5,7 +5,11 @@ import { afterAll, describe, expect, it } from "vitest";
 import type { Connector } from "../../services/ts-console/src/lib/connectors/connector.js";
 import { createConnectorHttpClient } from "../../services/ts-console/src/lib/connectors/httpClient.js";
 import { MockConnector } from "../../services/ts-console/src/lib/connectors/mockConnector.js";
-import { StripeBillingConnector, STRIPE_BILLING_ENTITY_TYPES } from "../../services/ts-console/src/lib/connectors/stripeBillingConnector.js";
+import {
+  StripeBillingConnector,
+  STRIPE_BILLING_ENTITY_TYPES,
+  STRIPE_INCREMENTAL_EVENT_TYPES,
+} from "../../services/ts-console/src/lib/connectors/stripeBillingConnector.js";
 import {
   backfillTick,
   connectorIncrementalIntervalMs,
@@ -14,6 +18,7 @@ import {
   type SyncConnectorRow,
 } from "../../services/ts-console/src/lib/connectors/syncWorker.js";
 import { getSyncHealth } from "../../services/ts-console/src/lib/connectors/syncHealth.js";
+import { readUsableAccessToken } from "../../services/ts-console/src/lib/stripeConnect.js";
 import { pool, withTenant } from "./db.js";
 import { FAKE_STRIPE_URL, TENANT_ID, TS_CONSOLE_URL } from "./env.js";
 import { call } from "./http.js";
@@ -27,6 +32,7 @@ interface ConnectedStripe {
 
 interface FakeRequest {
   path: string;
+  query: string;
   requestBody: string;
   responseStatus: number;
   responseBody: string;
@@ -104,6 +110,15 @@ async function seed(accessToken: string, entity: string, records: unknown[] | nu
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  });
+  expect(response.status).toBe(200);
+}
+
+async function seedInvoiceLines(accessToken: string, invoiceId: string, lines: unknown[]) {
+  const response = await fetch(`${FAKE_STRIPE_URL}/_seed/invoice_lines`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: accessToken, invoice_id: invoiceId, lines }),
   });
   expect(response.status).toBe(200);
 }
@@ -370,6 +385,185 @@ describe("TEID-65 Stripe Billing connector", () => {
       await withTenant(TENANT_ID, async (client) => {
         await client.query("DELETE FROM connectors WHERE id = ANY($1::uuid[])", [ids.map((row) => row.id)]);
       });
+    }
+  });
+});
+
+describe("TEID-65.1 Stripe ingest completeness", () => {
+  it("TEID-65.1-T1 persists every invoice line from Stripe line pagination", async () => {
+    const fixture = await connectAndRegister("TEID-65.1 T1 Lines");
+    const created = Math.floor(Date.now() / 1_000) - 60;
+    const lines = [1, 2, 3].map((index) => ({
+      id: `il_651_${index}`,
+      price: "price_651",
+      quantity: "1",
+      unit_amount: "100",
+      amount: "100",
+      currency: "usd",
+    }));
+    try {
+      await seed(fixture.accessToken, "invoices", [{
+        id: "in_651_lines",
+        customer: "cus_651",
+        amount_due: "300",
+        currency: "usd",
+        status: "open",
+        created,
+        due_date: null,
+        lines: { data: [lines[0]], has_more: true },
+      }]);
+      await seedInvoiceLines(fixture.accessToken, "in_651_lines", lines);
+
+      const sync = await call(`${TS_CONSOLE_URL}/connectors/${fixture.connectorId}/sync`, {
+        method: "POST",
+        token: await billingSession(),
+      });
+      expect(sync.status).toBe(200);
+
+      const stored = await withTenant(TENANT_ID, async (client) => (await client.query<{ data: { lines: Array<{ id: string }> } }>(
+        `SELECT data FROM connector_records
+         WHERE connector_id = $1 AND entity_type = 'invoice' AND external_id = 'in_651_lines'`,
+        [fixture.connectorId],
+      )).rows[0].data);
+      expect(stored.lines.map((line) => line.id)).toEqual(lines.map((line) => line.id));
+
+      const requests = await fakeRequests();
+      expect(requests.some((request) => request.path === "/v1/invoices/in_651_lines/lines")).toBe(true);
+      const invoiceList = [...requests].reverse().find((request) => request.path === "/v1/invoices");
+      expect(invoiceList).toBeDefined();
+      expect(new URLSearchParams(invoiceList!.query).getAll("expand[]")).toContain("data.lines");
+    } finally {
+      await deleteFixture(fixture.connectorId, fixture.connectionId);
+    }
+  });
+
+  it("TEID-65.1-T2 refreshes a post-create invoice update through Stripe Events", async () => {
+    const fixture = await connectAndRegister("TEID-65.1 T2 Events");
+    const created = Math.floor(Date.now() / 1_000) - 3_600;
+    const firstLine = {
+      id: "il_651_update_1",
+      price: "price_651",
+      quantity: "1",
+      unit_amount: "100",
+      amount: "100",
+      currency: "usd",
+    };
+    const secondLine = { ...firstLine, id: "il_651_update_2" };
+    try {
+      await seed(fixture.accessToken, "invoices", [{
+        id: "in_651_update",
+        customer: "cus_651",
+        amount_due: "100",
+        currency: "usd",
+        status: "open",
+        created,
+        due_date: null,
+        lines: { data: [firstLine], has_more: false },
+      }]);
+      const backfill = await call(`${TS_CONSOLE_URL}/connectors/${fixture.connectorId}/sync`, {
+        method: "POST",
+        token: await billingSession(),
+      });
+      expect(backfill.status).toBe(200);
+      expect((await connectorRow(fixture.connectorId)).backfill_completed_at).not.toBeNull();
+
+      await seed(fixture.accessToken, "invoices", [{
+        id: "in_651_update",
+        customer: "cus_651",
+        amount_due: "200",
+        currency: "usd",
+        status: "paid",
+        created,
+        due_date: null,
+        lines: { data: [firstLine], has_more: true },
+      }]);
+      await seedInvoiceLines(fixture.accessToken, "in_651_update", [firstLine, secondLine]);
+
+      expect(await incrementalTick(pool, new Date(Date.now() + 3_000))).toBeGreaterThanOrEqual(1);
+      const stored = await withTenant(TENANT_ID, async (client) => (await client.query<{
+        data: { status: string; lines: Array<{ id: string }> };
+      }>(
+        `SELECT data FROM connector_records
+         WHERE connector_id = $1 AND entity_type = 'invoice' AND external_id = 'in_651_update'`,
+        [fixture.connectorId],
+      )).rows[0].data);
+      expect(stored.status).toBe("paid");
+      expect(stored.lines.map((line) => line.id)).toEqual([firstLine.id, secondLine.id]);
+      expect((await connectorRow(fixture.connectorId)).cursor_high_water.events?.since).toBeTruthy();
+
+      const eventRequest = [...await fakeRequests()].reverse().find((request) => request.path === "/v1/events");
+      expect(eventRequest).toBeDefined();
+      expect(new URLSearchParams(eventRequest!.query).getAll("type[]")).toEqual([...STRIPE_INCREMENTAL_EVENT_TYPES]);
+    } finally {
+      await deleteFixture(fixture.connectorId, fixture.connectionId);
+    }
+  });
+
+  it("TEID-65.1-T3 unregisters only the connector and leaves shared Stripe OAuth usable", async () => {
+    const fixture = await connectAndRegister("TEID-65.1 T3 Unregister");
+    try {
+      const deauthorizationsBefore = (await fakeRequests()).filter((request) =>
+        request.path === "/oauth/deauthorize").length;
+      const response = await call<{ id: string; status: string }>(
+        `${TS_CONSOLE_URL}/connectors/${fixture.connectorId}`,
+        { method: "DELETE", token: await billingSession() },
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({ id: fixture.connectorId, status: "disconnected" });
+      expect((await connectorRow(fixture.connectorId)).status).toBe("disconnected");
+
+      const connection = await withTenant(TENANT_ID, async (client) => {
+        const status = (await client.query<{ status: string }>(
+          "SELECT status FROM stripe_connections WHERE id = $1",
+          [fixture.connectionId],
+        )).rows[0].status;
+        const accessToken = await readUsableAccessToken(client, fixture.connectionId);
+        return { status, accessToken };
+      });
+      expect(connection).toEqual({ status: "connected", accessToken: fixture.accessToken });
+      expect((await fakeRequests()).filter((request) => request.path === "/oauth/deauthorize")).toHaveLength(
+        deauthorizationsBefore,
+      );
+    } finally {
+      await deleteFixture(fixture.connectorId, fixture.connectionId);
+    }
+  });
+
+  it("TEID-65.1-T6 maps a tiered Stripe price with null unit_amount without throwing", async () => {
+    const fixture = await connectAndRegister("TEID-65.1 T6 Tiered Price");
+    const created = Math.floor(Date.now() / 1_000) - 60;
+    try {
+      await seed(fixture.accessToken, "prices", [{
+        id: "price_651_tiered",
+        product: "prod_651",
+        unit_amount: null,
+        currency: "usd",
+        billing_scheme: "tiered",
+        tiers_mode: "graduated",
+        tiers: [{ up_to: 10, unit_amount: 100 }, { up_to: "inf", unit_amount: 80 }],
+        created,
+      }]);
+      const sync = await call(`${TS_CONSOLE_URL}/connectors/${fixture.connectorId}/sync`, {
+        method: "POST",
+        token: await billingSession(),
+      });
+      expect(sync.status).toBe(200);
+
+      const stored = await withTenant(TENANT_ID, async (client) => (await client.query<{
+        data: { amount: string; passthrough: Record<string, unknown> };
+      }>(
+        `SELECT data FROM connector_records
+         WHERE connector_id = $1 AND entity_type = 'price' AND external_id = 'price_651_tiered'`,
+        [fixture.connectorId],
+      )).rows[0].data);
+      expect(stored.amount).toBe("0");
+      expect(stored.passthrough).toMatchObject({
+        unit_amount: null,
+        tiers_mode: "graduated",
+        tiers: [{ up_to: 10, unit_amount: 100 }, { up_to: "inf", unit_amount: 80 }],
+      });
+    } finally {
+      await deleteFixture(fixture.connectorId, fixture.connectionId);
     }
   });
 });

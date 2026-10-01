@@ -31,8 +31,17 @@ interface IssuedToken {
   stripeUserId: string;
   stripeCustomers: Map<string, StripeCustomerRecord>;
   billingEntities: Record<BillingEntity, Map<string, Record<string, unknown>>>;
+  invoiceLines: Map<string, Record<string, unknown>[]>;
+  events: StripeEventRecord[];
   generatedInvoices: GeneratedInvoices | null;
   invoiceItems: Map<string, StripeInvoiceItemRecord>;
+}
+
+interface StripeEventRecord {
+  id: string;
+  type: string;
+  created: number;
+  data: { object: { id: string } };
 }
 
 type BillingEntity = "prices" | "subscriptions" | "invoices" | "credit_notes" | "charges" | "refunds";
@@ -68,6 +77,7 @@ const consumed = new Set<string>();
 const issuedTokens = new Map<string, IssuedToken>();
 const requests: LoggedExchange[] = [];
 let invoiceItemFailure: InvoiceItemFailure | null = null;
+let eventSequence = 0;
 
 function letters(count: number): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz";
@@ -186,6 +196,7 @@ function listBillingEntities(
             amount: "100",
             currency: "usd",
           })),
+          has_more: false,
         },
       });
     }
@@ -200,6 +211,43 @@ function listBillingEntities(
     }
   }
   return { data: rows.slice(0, limit), has_more: rows.length > limit };
+}
+
+function recordEvent(issued: IssuedToken, type: string, objectId: string): void {
+  eventSequence += 1;
+  issued.events.push({
+    id: `evt_fake_${eventSequence}`,
+    type,
+    created: Math.floor(Date.now() / 1_000),
+    data: { object: { id: objectId } },
+  });
+}
+
+function generatedInvoiceLines(issued: IssuedToken, invoiceId: string): Record<string, unknown>[] | null {
+  const generated = issued.generatedInvoices;
+  if (!generated || !invoiceId.startsWith("in_generated_")) return null;
+  const index = Number(invoiceId.slice("in_generated_".length));
+  if (!Number.isInteger(index) || index < 0 || index >= generated.invoiceCount) return null;
+  const baseLineCount = Math.floor(generated.lineItemCount / generated.invoiceCount);
+  const extra = index < generated.lineItemCount % generated.invoiceCount ? 1 : 0;
+  return Array.from({ length: baseLineCount + extra }, (_, lineIndex) => ({
+    id: `il_generated_${index}_${lineIndex}`,
+    price: "price_generated",
+    quantity: "1",
+    unit_amount: "100",
+    amount: "100",
+    currency: "usd",
+  }));
+}
+
+function allInvoiceLines(issued: IssuedToken, invoiceId: string): Record<string, unknown>[] | null {
+  const overridden = issued.invoiceLines.get(invoiceId);
+  if (overridden) return overridden;
+  const generated = generatedInvoiceLines(issued, invoiceId);
+  if (generated) return generated;
+  const invoice = issued.billingEntities.invoices.get(invoiceId);
+  const lines = invoice?.lines as { data?: unknown } | undefined;
+  return lines && Array.isArray(lines.data) ? lines.data as Record<string, unknown>[] : null;
 }
 
 const port = Number(process.env.FAKE_STRIPE_PORT ?? 8092);
@@ -252,6 +300,27 @@ const server = createServer(async (req, res) => {
       finish(res, 200, JSON.stringify({ seeded: seeded.length, ids: seeded }), "application/json");
       return;
     }
+    if (req.method === "POST" && path === "/_seed/invoice_lines") {
+      const requestBody = await readBody(req);
+      const payload = JSON.parse(requestBody) as {
+        access_token?: unknown;
+        invoice_id?: unknown;
+        lines?: unknown;
+      };
+      if (typeof payload.access_token !== "string" || !issuedTokens.has(payload.access_token)) {
+        finish(res, 400, JSON.stringify({ error: "unknown access_token" }), "application/json");
+        return;
+      }
+      if (typeof payload.invoice_id !== "string" || !Array.isArray(payload.lines)) {
+        finish(res, 400, JSON.stringify({ error: "invoice_id and lines are required" }), "application/json");
+        return;
+      }
+      const lines = payload.lines.filter((line): line is Record<string, unknown> =>
+        typeof line === "object" && line !== null && typeof (line as { id?: unknown }).id === "string");
+      issuedTokens.get(payload.access_token)!.invoiceLines.set(payload.invoice_id, lines);
+      finish(res, 200, JSON.stringify({ seeded: lines.length }), "application/json");
+      return;
+    }
     const seedEntity = BILLING_ENTITIES.find((entity) => path === `/_seed/${entity}`);
     if (req.method === "POST" && seedEntity) {
       const requestBody = await readBody(req);
@@ -281,6 +350,22 @@ const server = createServer(async (req, res) => {
         const record = value as Record<string, unknown>;
         if (typeof record.id !== "string" || record.id.length === 0) continue;
         issued.billingEntities[seedEntity].set(record.id, record);
+        if (seedEntity === "invoices") {
+          const lines = record.lines as { data?: unknown } | undefined;
+          if (!issued.invoiceLines.has(record.id) && lines && Array.isArray(lines.data)) {
+            issued.invoiceLines.set(record.id, lines.data as Record<string, unknown>[]);
+          }
+          recordEvent(issued, "invoice.updated", record.id);
+        } else if (seedEntity === "credit_notes") {
+          recordEvent(issued, "credit_note.created", record.id);
+        } else if (seedEntity === "charges" && record.refunded === true) {
+          recordEvent(issued, "charge.refunded", record.id);
+        } else if (seedEntity === "refunds") {
+          const chargeId = record.charge ?? record.payment;
+          if (typeof chargeId === "string" && issued.billingEntities.charges.has(chargeId)) {
+            recordEvent(issued, "charge.refunded", chargeId);
+          }
+        }
         seeded += 1;
       }
       if (seedEntity === "invoices" && payload.generated && typeof payload.generated === "object") {
@@ -408,6 +493,8 @@ const server = createServer(async (req, res) => {
           stripeUserId: issued.stripeUserId,
           stripeCustomers: new Map(),
           billingEntities: Object.fromEntries(BILLING_ENTITIES.map((entity) => [entity, new Map()])) as Record<BillingEntity, Map<string, Record<string, unknown>>>,
+          invoiceLines: new Map(),
+          events: [],
           generatedInvoices: null,
           invoiceItems: new Map(),
         });
@@ -468,6 +555,84 @@ const server = createServer(async (req, res) => {
           email: fields.email,
           created,
         });
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "GET" && path === "/v1/events") {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else {
+        const limitRaw = Number(url.searchParams.get("limit") ?? 100);
+        const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 100;
+        const createdRaw = url.searchParams.get("created[gte]");
+        const createdGte = createdRaw === null ? null : Number(createdRaw);
+        const types = new Set(url.searchParams.getAll("type[]"));
+        let rows = [...issued.events].reverse();
+        if (types.size > 0) rows = rows.filter((event) => types.has(event.type));
+        if (createdGte !== null && Number.isFinite(createdGte)) {
+          rows = rows.filter((event) => event.created >= createdGte);
+        }
+        const startingAfter = url.searchParams.get("starting_after");
+        if (startingAfter) {
+          const index = rows.findIndex((event) => event.id === startingAfter);
+          rows = index >= 0 ? rows.slice(index + 1) : [];
+        }
+        responseStatus = 200;
+        responseBody = JSON.stringify({
+          object: "list",
+          url: "/v1/events",
+          has_more: rows.length > limit,
+          data: rows.slice(0, limit),
+        });
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "GET" && /^\/v1\/invoices\/[^/]+\/lines$/.test(path)) {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else {
+        const invoiceId = decodeURIComponent(path.split("/")[3]);
+        let rows = allInvoiceLines(issued, invoiceId);
+        if (rows === null) {
+          responseStatus = 404;
+          responseBody = JSON.stringify({ error: "not_found" });
+        } else {
+          const startingAfter = url.searchParams.get("starting_after");
+          if (startingAfter) {
+            const index = rows.findIndex((line) => line.id === startingAfter);
+            rows = index >= 0 ? rows.slice(index + 1) : [];
+          }
+          const limitRaw = Number(url.searchParams.get("limit") ?? 100);
+          const limit = Number.isInteger(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 100;
+          responseStatus = 200;
+          responseBody = JSON.stringify({
+            object: "list",
+            url: `/v1/invoices/${invoiceId}/lines`,
+            has_more: rows.length > limit,
+            data: rows.slice(0, limit),
+          });
+        }
+      }
+      finish(res, responseStatus, responseBody, "application/json");
+    } else if (req.method === "GET" && /^\/v1\/(invoices|credit_notes|charges)\/[^/]+$/.test(path)) {
+      const issued = lookupIssued(req);
+      if (!issued) {
+        responseStatus = 401;
+        responseBody = JSON.stringify({ error: "unauthorized" });
+      } else {
+        const [, , rawEntity, rawId] = path.split("/");
+        const entity = rawEntity as Extract<BillingEntity, "invoices" | "credit_notes" | "charges">;
+        const id = decodeURIComponent(rawId);
+        const record = issued.billingEntities[entity].get(id);
+        if (!record) {
+          responseStatus = 404;
+          responseBody = JSON.stringify({ error: "not_found" });
+        } else {
+          responseStatus = 200;
+          responseBody = JSON.stringify(record);
+        }
       }
       finish(res, responseStatus, responseBody, "application/json");
     } else if (req.method === "GET" && BILLING_ENTITIES.some((entity) => path === `/v1/${entity}`)) {

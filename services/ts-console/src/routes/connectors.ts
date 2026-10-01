@@ -10,7 +10,6 @@ import {
 } from "../lib/connectors/syncWorker.js";
 import { getSyncHealth, humanizeConnectorError } from "../lib/connectors/syncHealth.js";
 import { withTenant } from "../lib/db.js";
-import { deauthorize, StripeOAuthError } from "../lib/stripeConnect.js";
 import { consoleRoute } from "../lib/roleGuard.js";
 import { requireSession } from "../lib/sessionAuth.js";
 
@@ -19,7 +18,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 interface StripeConnectionRow {
   id: string;
-  stripe_account_id: string;
   scope: string;
   status: string;
 }
@@ -58,7 +56,7 @@ export function registerConnectorRoutes(app: FastifyInstance, pool: Pool): void 
         | { connector: { id: string; status: string } };
       const result = await withTenant<RegisterResult>(pool, tenantId, async (client) => {
         const connection = (await client.query<StripeConnectionRow>(
-          `SELECT id, stripe_account_id, scope, status
+          `SELECT id, scope, status
            FROM stripe_connections WHERE id = $1 AND tenant_id = $2`,
           [stripeConnectionId, tenantId],
         )).rows[0];
@@ -146,35 +144,12 @@ export function registerConnectorRoutes(app: FastifyInstance, pool: Pool): void 
       const tenantId = req.consolePrincipal!.tenantId;
       const connector = await loadConnector(pool, tenantId, id);
       if (!connector || connector.status !== "connected") return reply.code(404).send({ error: "connector not found" });
-      let stripeConnection: StripeConnectionRow | null = null;
-      if (connector.connector_type === "stripe" && connector.stripe_connection_id) {
-        stripeConnection = await withTenant(pool, tenantId, async (client) => (await client.query<StripeConnectionRow>(
-          `SELECT id, stripe_account_id, scope, status
-           FROM stripe_connections WHERE id = $1 AND tenant_id = $2`,
-          [connector.stripe_connection_id, tenantId],
-        )).rows[0] ?? null);
-        if (stripeConnection?.status === "connected") {
-          try {
-            await deauthorize(stripeConnection.stripe_account_id);
-          } catch (error) {
-            if (error instanceof StripeOAuthError) return reply.code(error.statusCode).send({ error: error.message });
-            throw error;
-          }
-        }
-      }
       await withTenant(pool, tenantId, async (client) => {
         await client.query(
           `UPDATE connectors SET status = 'disconnected', updated_at = now()
            WHERE id = $1 AND tenant_id = $2`,
           [id, tenantId],
         );
-        if (stripeConnection) {
-          await client.query(
-            `UPDATE stripe_connections SET status = 'disconnected', disconnected_at = now()
-             WHERE id = $1 AND tenant_id = $2`,
-            [stripeConnection.id, tenantId],
-          );
-        }
       });
       return reply.send({ id, status: "disconnected" });
     });

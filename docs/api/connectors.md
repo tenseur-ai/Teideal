@@ -50,9 +50,9 @@ curl -X POST "$TS_CONSOLE_URL/connectors/$CONNECTOR_ID/sync" -H "authorization: 
 ## DELETE /connectors/:id [ts-console]
 
 - **Auth:** Owner, Billing Admin, or Developer session.
-- **Request:** Connector UUID in `:id`; no body. Stripe connectors are also deauthorized through the existing Stripe Connect OAuth flow.
+- **Request:** Connector UUID in `:id`; no body. This unregisters only the billing connector and stops its scheduled syncs. For Stripe, the shared Stripe Connect OAuth connection remains connected; OAuth revocation remains the responsibility of the existing Stripe Connect disconnect flow.
 - **Response:** `200 {id,status:"disconnected"}`.
-- **Errors:** `400` invalid UUID or Stripe deauthorization failure; `401` invalid session; `403` disallowed role; `404` connected connector not found.
+- **Errors:** `400` invalid UUID; `401` invalid session; `403` disallowed role; `404` connected connector not found.
 
 ```bash
 curl -X DELETE "$TS_CONSOLE_URL/connectors/$CONNECTOR_ID" -H "authorization: Bearer $SESSION_TOKEN"
