@@ -17,7 +17,7 @@ curl -X POST "$TS_CONSOLE_URL/verify/map-billed-lines" \
   -H "authorization: Bearer $SESSION_TOKEN"
 ```
 
-## GET /verify/discrepancy-report?period=YYYY-MM [ts-console]
+## GET /verify/discrepancy-report [ts-console]
 
 - **Auth:** Console session with `Owner`, `Billing Admin`, or `Finance` role.
 - **Request:** Required calendar-month `period` in `YYYY-MM` format. Other query
