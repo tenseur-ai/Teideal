@@ -33,7 +33,26 @@ const SAMPLE_FIXTURES: StripeLikeExport = {
     { id: "sub_001", customer: "cus_001", status: "active", start_date: 1_725_000_000, ended_at: null },
   ],
   invoices: [
-    { id: "in_001", customer: "cus_001", amount_due: 2598, currency: "usd", status: "open", created: 1_725_000_200, due_date: 1_727_592_200 },
+    {
+      id: "in_001",
+      customer: "cus_001",
+      amount_due: 2598,
+      currency: "usd",
+      status: "open",
+      created: 1_725_000_200,
+      due_date: 1_727_592_200,
+      lines: [{
+        id: "il_001",
+        price: "price_001",
+        description: "Compute usage",
+        quantity: 2,
+        unit_amount: 1299,
+        amount: 2598,
+        currency: "usd",
+        period_start: 1_725_000_000,
+        period_end: 1_727_592_000,
+      }],
+    },
   ],
   credits: [
     { id: "cn_001", customer: "cus_001", amount: 300, currency: "usd", reason: "service_credit", created: 1_725_000_300 },
