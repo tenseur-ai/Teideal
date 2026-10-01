@@ -25,6 +25,15 @@ export interface PeriodCloseSummaryRow {
   adjustments: string;
   last_stripe_sync_status: "running" | "succeeded" | "failed" | null;
   last_stripe_sync_error: string | null;
+  expected_evidence?: PeriodCloseExpectedEvidence;
+}
+
+export interface PeriodCloseExpectedEvidence {
+  ledger_line_ids: string[];
+  overage_consumption_line_ids: string[];
+  usage_event_ids: string[];
+  usage_event_count: string;
+  usage_quantity: string;
 }
 
 export type InvoiceSyncCategory = "usage" | "overage";
@@ -47,6 +56,7 @@ export interface PeriodCloseSummaryInput {
   periodEnd: string;
   search?: string;
   sort?: PeriodCloseSort;
+  includeEvidence?: boolean;
 }
 
 interface CustomerRow {
@@ -268,6 +278,13 @@ export async function generatePeriodCloseSummary(input: PeriodCloseSummaryInput)
   const expired = new Map(local.expiries.map((row) => [row.customer_id, row.expired_credits]));
   const ledger = new Map(ledgerRows.map((row) => [row.customer_id, row]));
   const sync = new Map(local.syncStatus.map((row) => [row.customer_id, row]));
+  const overageEvidence = input.includeEvidence
+    ? new Map(
+      local.consumption
+        .filter((entry) => entry.source_category === "overage")
+        .map((entry) => [entry.customer_id, entry.line_ids ?? []]),
+    )
+    : new Map<string, string[]>();
 
   // Customers are the authoritative left side. Activity tables only enrich
   // these rows, so an inactive customer is represented by explicit zeroes.
@@ -275,7 +292,7 @@ export async function generatePeriodCloseSummary(input: PeriodCloseSummaryInput)
     const breakdown = credits.get(customer.id) ?? ZERO_CREDITS();
     const ledgerRow = ledger.get(customer.id);
     const syncRow = sync.get(customer.id);
-    return {
+    const row: PeriodCloseSummaryRow = {
       customer_id: customer.id,
       customer_name: customer.name,
       usage_billed: ledgerRow?.usage_billed ?? "0",
@@ -287,6 +304,16 @@ export async function generatePeriodCloseSummary(input: PeriodCloseSummaryInput)
       last_stripe_sync_status: syncRow?.status ?? null,
       last_stripe_sync_error: syncRow?.error_message ?? null,
     };
+    if (input.includeEvidence) {
+      row.expected_evidence = {
+        ledger_line_ids: ledgerRow?.ledger_line_ids ?? [],
+        overage_consumption_line_ids: overageEvidence.get(customer.id) ?? [],
+        usage_event_ids: ledgerRow?.usage_event_ids ?? [],
+        usage_event_count: ledgerRow?.usage_event_count ?? "0",
+        usage_quantity: ledgerRow?.usage_quantity ?? "0",
+      };
+    }
+    return row;
   });
 
   const search = input.search?.trim().toLocaleLowerCase();
