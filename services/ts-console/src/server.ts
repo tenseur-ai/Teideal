@@ -36,6 +36,7 @@ import { registerTimelineRoutes } from "./routes/timeline.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerPeriodCloseRoutes } from "./routes/periodClose.js";
 import { registerConnectorRoutes } from "./routes/connectors.js";
+import { registerCostRateRoutes } from "./routes/costRates.js";
 import {
   backfillTick,
   connectorBackfillTickIntervalMs,
@@ -91,6 +92,7 @@ export function buildServer(options: BuildServerOptions = {}) {
   registerBillingAlertRoutes(app, pool);
   registerPeriodCloseRoutes(app, pool);
   registerConnectorRoutes(app, pool);
+  registerCostRateRoutes(app, pool);
   stripeApiBaseUrl();
 
   registerCustomerHierarchyRoutes(app, pool);

@@ -30,17 +30,33 @@ type Handlers struct {
 }
 
 type usageEvent struct {
-	ID                      string          `json:"id"`
-	CustomerID              string          `json:"customer_id"`
-	EventType               string          `json:"event_type"`
-	Quantity                decimal.Decimal `json:"quantity"`
-	IdempotencyKey          string          `json:"idempotency_key"`
-	OccurredAt              time.Time       `json:"occurred_at"`
-	IsPriorPeriodAdjustment bool            `json:"is_prior_period_adjustment"`
+	ID                      string           `json:"id"`
+	CustomerID              string           `json:"customer_id"`
+	EventType               string           `json:"event_type"`
+	Quantity                decimal.Decimal  `json:"quantity"`
+	IdempotencyKey          string           `json:"idempotency_key"`
+	OccurredAt              time.Time        `json:"occurred_at"`
+	IsPriorPeriodAdjustment bool             `json:"is_prior_period_adjustment"`
+	Model                   *string          `json:"model,omitempty"`
+	ActualCost              *decimal.Decimal `json:"actual_cost,omitempty"`
 }
 
 var eventTypeRegex = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 var oneTrillion = decimal.New(1, 12)
+var maxActualCost = decimal.New(1, 6) // 1,000,000
+
+func validateActualCost(ac *decimal.Decimal) error {
+	if ac == nil {
+		return nil
+	}
+	if ac.IsNegative() {
+		return errors.New("actual_cost must be a non-negative number")
+	}
+	if ac.GreaterThanOrEqual(maxActualCost) {
+		return errors.New("actual_cost must be less than 1000000")
+	}
+	return nil
+}
 
 func init() {
 	// decimal defaults to quoted JSON strings. Usage quantities have always
@@ -167,7 +183,7 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 	err = h.Pool.WithTenant(r.Context(), principal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, customer_id, event_type, quantity, idempotency_key, occurred_at,
-			       is_prior_period_adjustment
+			       is_prior_period_adjustment, model, actual_cost
 			FROM usage_events
 			WHERE ($1::uuid IS NULL OR customer_id = $1)
 			  AND ($2::boolean IS NULL OR is_prior_period_adjustment = $2)
@@ -185,15 +201,23 @@ func (h *Handlers) GetUsage(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var e usageEvent
 			var quantity pgtype.Numeric
+			var actualCost pgtype.Numeric
 			if err := rows.Scan(
 				&e.ID, &e.CustomerID, &e.EventType, &quantity, &e.IdempotencyKey,
-				&e.OccurredAt, &e.IsPriorPeriodAdjustment,
+				&e.OccurredAt, &e.IsPriorPeriodAdjustment, &e.Model, &actualCost,
 			); err != nil {
 				return err
 			}
 			e.Quantity, err = money.FromPGNumeric(quantity)
 			if err != nil {
 				return err
+			}
+			if actualCost.Valid {
+				ac, err := money.FromPGNumeric(actualCost)
+				if err != nil {
+					return err
+				}
+				e.ActualCost = &ac
 			}
 			events = append(events, e)
 		}
@@ -290,11 +314,13 @@ func (h *Handlers) getUsageBuckets(
 }
 
 type postUsageRequest struct {
-	CustomerID     string          `json:"customer_id"`
-	EventType      string          `json:"event_type"`
-	Quantity       decimal.Decimal `json:"quantity"`
-	IdempotencyKey string          `json:"idempotency_key"`
-	OccurredAt     *time.Time      `json:"occurred_at,omitempty"`
+	CustomerID     string           `json:"customer_id"`
+	EventType      string           `json:"event_type"`
+	Quantity       decimal.Decimal  `json:"quantity"`
+	IdempotencyKey string           `json:"idempotency_key"`
+	OccurredAt     *time.Time       `json:"occurred_at,omitempty"`
+	Model          *string          `json:"model,omitempty"`
+	ActualCost     *decimal.Decimal `json:"actual_cost,omitempty"`
 }
 
 type rawBatchItem struct {
@@ -303,6 +329,8 @@ type rawBatchItem struct {
 	Quantity       json.RawMessage `json:"quantity"`
 	IdempotencyKey *string         `json:"idempotency_key"`
 	OccurredAt     json.RawMessage `json:"occurred_at"`
+	Model          *string         `json:"model,omitempty"`
+	ActualCost     json.RawMessage `json:"actual_cost,omitempty"`
 }
 
 type batchResultItem struct {
@@ -315,6 +343,8 @@ type batchResultItem struct {
 	OccurredAt     *time.Time       `json:"occurred_at,omitempty"`
 	Reason         string           `json:"reason,omitempty"`
 	AdjustmentID   string           `json:"adjustment_id,omitempty"`
+	Model          *string          `json:"model,omitempty"`
+	ActualCost     *decimal.Decimal `json:"actual_cost,omitempty"`
 }
 
 type usageWriteResult struct {
@@ -356,7 +386,7 @@ func writeUsage(
 	if now.Before(periodEnd) {
 		return usageWriteResult{}, insertUsageEvent(
 			ctx, tx, tenantID, request.CustomerID, request.EventType, quantity,
-			request.IdempotencyKey, request.OccurredAt, created, createdQuantity,
+			request.IdempotencyKey, request.OccurredAt, request.Model, request.ActualCost, created, createdQuantity,
 		)
 	}
 
@@ -392,7 +422,7 @@ func writeUsage(
 
 	if err := insertPriorPeriodUsageEvent(
 		ctx, tx, tenantID, request.CustomerID, request.EventType, quantity,
-		request.IdempotencyKey, occurredAt, created, createdQuantity,
+		request.IdempotencyKey, occurredAt, request.Model, request.ActualCost, created, createdQuantity,
 	); err != nil {
 		return result, err
 	}
@@ -447,6 +477,8 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		Quantity       decimal.Decimal `json:"quantity"`
 		IdempotencyKey string          `json:"idempotency_key"`
 		OccurredAt     json.RawMessage `json:"occurred_at"`
+		Model          *string         `json:"model"`
+		ActualCost     json.RawMessage `json:"actual_cost"`
 	}
 	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -457,12 +489,27 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var actualCost *decimal.Decimal
+	if len(raw.ActualCost) > 0 && string(raw.ActualCost) != "null" {
+		var ac decimal.Decimal
+		if err := json.Unmarshal(raw.ActualCost, &ac); err != nil {
+			writeErr(w, http.StatusBadRequest, "actual_cost must be a non-negative number less than 1000000")
+			return
+		}
+		if err := validateActualCost(&ac); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		actualCost = &ac
+	}
 	req := postUsageRequest{
 		CustomerID:     raw.CustomerID,
 		EventType:      raw.EventType,
 		Quantity:       raw.Quantity,
 		IdempotencyKey: raw.IdempotencyKey,
 		OccurredAt:     occurredAt,
+		Model:          raw.Model,
+		ActualCost:     actualCost,
 	}
 	if _, err := uuid.Parse(req.CustomerID); err != nil {
 		writeErr(w, http.StatusBadRequest, "customer_id must be a UUID")
@@ -553,7 +600,7 @@ func (h *Handlers) postUsageSingle(w http.ResponseWriter, r *http.Request, princ
 					case outcomeInserted:
 						return insertUsageEvent(
 							ctx, tx, principal.TenantID, req.CustomerID, req.EventType, quantity,
-							req.IdempotencyKey, req.OccurredAt, &created, &createdQuantity,
+							req.IdempotencyKey, req.OccurredAt, req.Model, req.ActualCost, &created, &createdQuantity,
 						)
 					case outcomeConflict:
 						return recordConflict(
@@ -693,12 +740,28 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			continue
 		}
 
+		var itemActualCost *decimal.Decimal
+		if len(item.ActualCost) > 0 && string(item.ActualCost) != "null" {
+			var ac decimal.Decimal
+			if err := json.Unmarshal(item.ActualCost, &ac); err != nil {
+				results[i] = batchResultItem{Status: "error", Reason: "actual_cost must be a non-negative number less than 1000000"}
+				continue
+			}
+			if err := validateActualCost(&ac); err != nil {
+				results[i] = batchResultItem{Status: "error", Reason: err.Error()}
+				continue
+			}
+			itemActualCost = &ac
+		}
+
 		itemRequest := postUsageRequest{
 			CustomerID:     *item.CustomerID,
 			EventType:      *item.EventType,
 			Quantity:       qty,
 			IdempotencyKey: *item.IdempotencyKey,
 			OccurredAt:     occurredAt,
+			Model:          item.Model,
+			ActualCost:     itemActualCost,
 		}
 		now := time.Now().UTC()
 
@@ -755,7 +818,7 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 						case outcomeInserted:
 							return insertUsageEvent(
 								ctx, tx, principal.TenantID, *item.CustomerID, *item.EventType, quantity,
-								*item.IdempotencyKey, occurredAt, &created, &createdQuantity,
+								*item.IdempotencyKey, occurredAt, item.Model, itemActualCost, &created, &createdQuantity,
 							)
 						case outcomeConflict:
 							return recordConflict(
@@ -826,6 +889,8 @@ func (h *Handlers) postUsageBatch(w http.ResponseWriter, r *http.Request, princi
 			Quantity:       &created.Quantity,
 			IdempotencyKey: created.IdempotencyKey,
 			OccurredAt:     &created.OccurredAt,
+			Model:          created.Model,
+			ActualCost:     created.ActualCost,
 		}
 	}
 
@@ -894,24 +959,48 @@ func insertUsageEvent(
 	quantity pgtype.Numeric,
 	idempotencyKey string,
 	occurredAt *time.Time,
+	model *string,
+	actualCost *decimal.Decimal,
 	created *usageEvent,
 	createdQuantity *pgtype.Numeric,
 ) error {
-	if occurredAt == nil {
-		return tx.QueryRow(ctx, `
-			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key)
-			VALUES ($1, $2, $3, $4, $5)
-			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-		`, tenantID, customerID, eventType, quantity, idempotencyKey).
-			Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+	var acNumeric pgtype.Numeric
+	if actualCost != nil {
+		var err error
+		acNumeric, err = money.ToPGNumeric(*actualCost)
+		if err != nil {
+			return err
+		}
 	}
 
-	return tx.QueryRow(ctx, `
-		INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at
-	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt).
-		Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt)
+	var retActualCost pgtype.Numeric
+	var err error
+	if occurredAt == nil {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key, model, actual_cost)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at, model, actual_cost
+		`, tenantID, customerID, eventType, quantity, idempotencyKey, model, acNumeric).
+			Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt, &created.Model, &retActualCost)
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO usage_events (tenant_id, customer_id, event_type, quantity, idempotency_key, occurred_at, model, actual_cost)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at, model, actual_cost
+		`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt, model, acNumeric).
+			Scan(&created.ID, &created.CustomerID, &created.EventType, createdQuantity, &created.IdempotencyKey, &created.OccurredAt, &created.Model, &retActualCost)
+	}
+	if err != nil {
+		return err
+	}
+	if retActualCost.Valid {
+		ac, err := money.FromPGNumeric(retActualCost)
+		if err != nil {
+			return err
+		}
+		created.ActualCost = &ac
+	}
+	return nil
 }
 
 func insertPriorPeriodUsageEvent(
@@ -923,23 +1012,46 @@ func insertPriorPeriodUsageEvent(
 	quantity pgtype.Numeric,
 	idempotencyKey string,
 	occurredAt time.Time,
+	model *string,
+	actualCost *decimal.Decimal,
 	created *usageEvent,
 	createdQuantity *pgtype.Numeric,
 ) error {
+	var acNumeric pgtype.Numeric
+	if actualCost != nil {
+		var err error
+		acNumeric, err = money.ToPGNumeric(*actualCost)
+		if err != nil {
+			return err
+		}
+	}
+
+	var retActualCost pgtype.Numeric
 	err := tx.QueryRow(ctx, `
 		INSERT INTO usage_events (
 			tenant_id, customer_id, event_type, quantity, idempotency_key,
-			occurred_at, is_prior_period_adjustment
+			occurred_at, is_prior_period_adjustment, model, actual_cost
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, true)
+		VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
 		RETURNING id, customer_id, event_type, quantity, idempotency_key, occurred_at,
-		          is_prior_period_adjustment
-	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt).
+		          is_prior_period_adjustment, model, actual_cost
+	`, tenantID, customerID, eventType, quantity, idempotencyKey, occurredAt, model, acNumeric).
 		Scan(
 			&created.ID, &created.CustomerID, &created.EventType, createdQuantity,
 			&created.IdempotencyKey, &created.OccurredAt, &created.IsPriorPeriodAdjustment,
+			&created.Model, &retActualCost,
 		)
-	return err
+	if err != nil {
+		return err
+	}
+	if retActualCost.Valid {
+		ac, err := money.FromPGNumeric(retActualCost)
+		if err != nil {
+			return err
+		}
+		created.ActualCost = &ac
+	}
+	return nil
 }
 
 type usageSummaryResponse struct {

@@ -191,7 +191,7 @@ func reviewAdjustment(
 	var createdQuantity pgtype.Numeric
 	if err := insertPriorPeriodUsageEvent(
 		ctx, tx, tenantID, existing.CustomerID, existing.EventType, quantity,
-		existing.IdempotencyKey, existing.OccurredAt, &created, &createdQuantity,
+		existing.IdempotencyKey, existing.OccurredAt, nil, nil, &created, &createdQuantity,
 	); err != nil {
 		return usageAdjustment{}, err
 	}
