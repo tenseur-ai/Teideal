@@ -210,6 +210,57 @@ function instanceFor(pool: Pool, connector: SyncConnectorRow): Connector {
   throw new Error(`unsupported scheduled connector type: ${connector.connector_type}`);
 }
 
+async function runStripeEventSync(
+  pool: Pool,
+  tenantId: string,
+  connector: SyncConnectorRow,
+  stripe: StripeBillingConnector,
+  now: Date,
+): Promise<RunConnectorSyncResult> {
+  const backfillCompletedAt = connector.backfill_completed_at;
+  if (backfillCompletedAt === null) throw new Error("event sync requires a completed backfill");
+  const syncId = await startSync(pool, tenantId, connector.id);
+  const attemptStartedAt = now.toISOString();
+  const persisted = connector.cursor_high_water.events;
+  const since = persisted?.since ?? new Date(backfillCompletedAt).toISOString();
+  let cursor = persisted?.cursor ?? null;
+  let recordsSynced = 0;
+
+  try {
+    while (true) {
+      const page = await stripe.listEvents(since, cursor);
+      for (const event of page.data) {
+        const refreshed = await stripe.retrieveEventRecord(event);
+        await upsertPage(pool, tenantId, connector.id, refreshed.entityType, [refreshed.record]);
+        recordsSynced += 1;
+      }
+      const position: SyncWatermarkPosition = { since, cursor: page.nextCursor };
+      await advanceWatermark(pool, tenantId, connector.id, "events", position);
+      connector.cursor_high_water.events = position;
+      cursor = page.nextCursor;
+      if (cursor === null) break;
+    }
+
+    const watermark: SyncWatermark = {
+      events: { since: attemptStartedAt, cursor: null },
+    };
+    await completeSync(pool, tenantId, syncId, {
+      status: "succeeded",
+      recordsSynced,
+      watermark,
+    });
+    connector.cursor_high_water.events = watermark.events;
+    return { completed: true, recordsSynced };
+  } catch (error) {
+    await completeSync(pool, tenantId, syncId, {
+      status: "failed",
+      recordsSynced,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 export async function backfillTick(pool: Pool, now = new Date()): Promise<number> {
   let completed = 0;
   for (const tenantId of await tenantIds(pool)) {
@@ -243,12 +294,16 @@ export async function incrementalTick(pool: Pool, now = new Date()): Promise<num
   for (const tenantId of await tenantIds(pool)) {
     for (const connector of await loadCandidates(pool, tenantId, false)) {
       try {
-        const result = await runConnectorSync(pool, tenantId, connector, instanceFor(pool, connector), {
+        const instance = instanceFor(pool, connector);
+        const result = await runConnectorSync(pool, tenantId, connector, instance, {
           entityTypes: STRIPE_BILLING_ENTITY_TYPES,
           timeBudgetMs: null,
           now,
         });
-        if (result.completed) completed += 1;
+        if (result.completed) {
+          await runStripeEventSync(pool, tenantId, connector, instance as StripeBillingConnector, now);
+          completed += 1;
+        }
       } catch (error) {
         console.error(`incremental connector sync failed for ${connector.id}:`, error);
       }
