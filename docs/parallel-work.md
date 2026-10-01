@@ -299,12 +299,25 @@ so far and `main` has never diverged).
   only to its own phase's test directory. Every agent's spec should call
   this out explicitly when it applies (TEID-92's and TEID-43's specs do,
   as examples to follow).
+- **`notes/`.** As of 2026-10-01, a developer agent's own implementation
+  notes (the gaps it found and how it resolved them, risks it flagged for
+  the verifier) go in `notes/NOTES-TEID-XX.md`, not a bare
+  `NOTES-TEID-XX.md` at the repo root -- the root had accumulated 27 of
+  these by TEID-98's story alone. When writing a new agent's prompt,
+  point it at `notes/NOTES-TEID-XX.md` explicitly; a prompt copied from
+  an older one may still say "at the repo root" and needs that one line
+  updated. Existing notes files were moved, not duplicated -- older phase
+  rows in this doc that reference a bare `NOTES-TEID-XX.md` filename are
+  describing where the file was *at the time*, so they're left as
+  accurate history rather than rewritten.
 - **The live tracking board** (the published claude.ai artifact's
   `EMBEDDED_STATE`). Claude owns syncing this -- no developer agent has
   publish access to it.
-  **Current URL: `https://claude.ai/artifact/DHJth2uHYfvARADya6xNeZ`**
-  (republished 2026-09-28 -- the previous board, referenced in earlier
-  handover docs as `.../839FeX3RzSMymBpPySBYXj`, became unreadable this
+  **Current URL: `https://claude.ai/artifact/3fGfA2zf4AELT8vKU9L2YF`**
+  (republished 2026-09-30, after `.../DHJth2uHYfvARADya6xNeZ` -- itself a
+  2026-09-28 republish -- was found unreadable in turn; same
+  `artifact-deleted` failure mode as the one below. The previous board,
+  referenced in earlier handover docs as `.../839FeX3RzSMymBpPySBYXj`, became unreadable this
   session: it resolved as owned by a different account than this
   session's, with no write access and only a lossy isolated-summary read.
   The board's source app (`index.html`/`app.js`, uses the Artifact tool's
