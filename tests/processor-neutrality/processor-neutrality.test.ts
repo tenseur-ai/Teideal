@@ -286,13 +286,14 @@ describe("TEID-74 processor-neutral ledger", () => {
          AND c2.column_name ILIKE '%stripe%'
        ORDER BY c1.table_name`,
     );
-    // period_close_invoice_line_items (TEID-39) stores stripe_invoice_item_id
-    // the same way stripe_customer_links stores stripe_customer_id -- a
+    // period_close_invoice_line_items (TEID-39) and verify_billed_lines
+    // (TEID-66) store stripe_invoice_item_id / stripe_invoice_line_id the
+    // same way stripe_customer_links stores stripe_customer_id -- a
     // non-primary-key reference column, never the row's own identity. This
     // allowlist is of known-safe reference tables, not a rule against a
-    // second one existing.
+    // further one existing.
     expect(referenceTables.rows.map((row) => row.table_name)).toEqual(
-      ["period_close_invoice_line_items", "stripe_customer_links"],
+      ["period_close_invoice_line_items", "stripe_customer_links", "verify_billed_lines"],
     );
 
     // information_schema.constraint_column_usage is empty for teideal_app
