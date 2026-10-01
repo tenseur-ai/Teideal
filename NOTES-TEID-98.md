@@ -45,3 +45,34 @@ implements it.
 - No conflict was found between `specs/TEID-98.1.md` and
   `TEID-98.1-Claude-Prompt.md`; the source prompt therefore required no
   precedence resolution.
+
+## TEID-98.2 (post-merge follow-up, 2026-10-01)
+
+Implements `specs/TEID-98.2.md`: CI install-step hygiene, a real `product_id`
+mapping bug fix, three documentation comments, and item 6 -- the
+`tests/stripe-connect` GCM auth-tag mismatch reported identically across
+TEID-48, TEID-98, and TEID-98.1's independent verification.
+
+**Root cause of item 6, confirmed by actual reproduction, not inferred (by
+the architect, before any remediation code was written):** `stripeConnect.ts`
+caches its AES-256-GCM encryption key at module-import time, and
+`tests/stripe-connect`'s own test files import that module directly inside
+the vitest process -- a separate Node process from the `ts-console` server
+every verification pass starts independently. Across all three prior
+verification passes, the server was started with an explicit, custom
+`STRIPE_TOKEN_ENCRYPTION_KEY`, but the `npx vitest run` command for
+`tests/stripe-connect` (and `tests/cross-tenant`, which shares the same
+import path) was never given that same variable, so it silently fell back to
+`tests/stripe-connect/env.ts`'s own different default key. Two different
+keys, one real GCM auth-tag mismatch every time -- not a flake, not an
+environment quirk, a straightforward key inconsistency in how verification
+was invoked. `.github/workflows/ci.yml` was never affected: it already sets
+`STRIPE_TOKEN_ENCRYPTION_KEY` once, for the server-start step, to the exact
+value `env.ts`'s own default already is, so every real CI run has correctly
+exercised this code path the entire time. Confirmed empirically: a fresh
+database, a fresh server, and `tests/stripe-connect`/`tests/cross-tenant` run
+with the *same* key passed to both the server and the test command --
+`tests/stripe-connect` 16/16, `tests/cross-tenant` 75/75 (including the two
+tests previously reported failing in TEID-48/50/98/98.1's own verification
+notes). No code in `stripeConnect.ts` or `credentials.ts` was changed for
+this item; there was nothing wrong with either file.
