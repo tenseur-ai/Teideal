@@ -1,3 +1,6 @@
+// CONNECTOR_CREDENTIAL_ENCRYPTION_KEY encrypts API-key connector secrets on connectors.credential_*.
+// Stripe Connect OAuth access/refresh tokens stay on stripe_connections under STRIPE_TOKEN_ENCRYPTION_KEY.
+// TEID-65 must read Stripe tokens from stripe_connections and must not copy them into connectors.credential_*.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 export interface EncryptedCredential {

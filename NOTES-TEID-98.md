@@ -76,3 +76,22 @@ with the *same* key passed to both the server and the test command --
 tests previously reported failing in TEID-48/50/98/98.1's own verification
 notes). No code in `stripeConnect.ts` or `credentials.ts` was changed for
 this item; there was nothing wrong with either file.
+
+Implementation notes for items 1-5:
+
+1. The connector framework dependency install in `.github/workflows/ci.yml`
+   now uses `npm ci`, matching the repository's lockfile-driven suite installs.
+2. `mapConnectorPrice` now resolves object products, `prod_`-prefixed fixture
+   ids, and bare display names explicitly. Bare display names retain their name
+   but map to a null `product_id`.
+3. `decimalAmount` now documents its integer-minor-units-only contract and the
+   intentional absence of a major-unit mode.
+4. `credentials.ts` now documents the boundary between API-key connector
+   credentials and Stripe Connect OAuth tokens.
+5. `completeSync` now documents that PostgreSQL JSONB `||` shallowly replaces
+   each supplied top-level entity watermark rather than merging nested fields.
+
+TEID-98.2-T1 covers all three supported product shapes, and TEID-98.2-T2
+covers USD and JPY integer-minor-unit conversion plus rejection of a dotted
+major-unit string. Existing TEID-98/TEID-98.1 product fixtures already conform
+to the corrected mapping, so none of their expectations required adjustment.

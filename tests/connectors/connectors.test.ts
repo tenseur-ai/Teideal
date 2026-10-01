@@ -10,6 +10,8 @@ import {
 import { createConnectorHttpClient } from "../../services/ts-console/src/lib/connectors/httpClient.js";
 import {
   currencyMinorDigits,
+  decimalAmount,
+  mapConnectorPrice,
   MockConnector,
   type StripeLikeExport,
 } from "../../services/ts-console/src/lib/connectors/mockConnector.js";
@@ -470,5 +472,32 @@ describe("TEID-98.1 connector landing-zone remediation", () => {
         await client.query("DELETE FROM connectors WHERE connector_type = 'stripe' AND display_name = $1", [displayName]);
       });
     }
+  });
+});
+
+describe("TEID-98.2 connector landing-zone residuals", () => {
+  it("TEID-98.2-T1 distinguishes product objects, platform ids, and display-name strings", () => {
+    const basePrice = {
+      unit_amount: 100,
+      currency: "usd",
+      billing_scheme: "per_unit",
+    };
+    const products = [
+      mapConnectorPrice({ id: "price_object", product: { id: "prod_abc", name: "API calls" }, ...basePrice }),
+      mapConnectorPrice({ id: "price_id", product: "prod_xyz", ...basePrice }),
+      mapConnectorPrice({ id: "price_name", product: "Compute", ...basePrice }),
+    ];
+
+    expect(products.map(({ product_id, product_name }) => ({ product_id, product_name }))).toEqual([
+      { product_id: "prod_abc", product_name: "API calls" },
+      { product_id: "prod_xyz", product_name: "prod_xyz" },
+      { product_id: null, product_name: "Compute" },
+    ]);
+  });
+
+  it("TEID-98.2-T2 converts integer minor units and rejects dotted major-unit strings", () => {
+    expect(decimalAmount(1001, "USD")).toBe("10.01");
+    expect(decimalAmount(100, "JPY")).toBe("100");
+    expect(() => decimalAmount("10.01", "USD")).toThrow(ConnectorError);
   });
 });
