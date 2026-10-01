@@ -1,10 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { ConnectorError } from "./connectors/connector.js";
 import {
-  connectorBackoffDelayMs,
-  createConnectorHttpClient,
-  type ConnectorHttpClient,
-} from "./connectors/httpClient.js";
+  httpRetryBackoffDelayMs,
+  createHttpRetryClient,
+  type HttpRetryClient,
+} from "./httpRetryClient.js";
 import { withTenant } from "./db.js";
 import {
   compareDecimalStrings,
@@ -70,7 +70,7 @@ export interface SyncPeriodCloseInvoiceInput {
   customerId: string;
   periodStart: string;
   periodEnd: string;
-  httpClient?: ConnectorHttpClient;
+  httpClient?: HttpRetryClient;
   beforeStripeWrite?: () => Promise<void>;
 }
 
@@ -125,7 +125,7 @@ export function buildLedgerReference(
 }
 
 export function periodCloseStripeBackoffMs(attemptNumber: number): number {
-  return connectorBackoffDelayMs(
+  return httpRetryBackoffDelayMs(
     attemptNumber,
     PERIOD_CLOSE_STRIPE_BASE_DELAY_MS,
     PERIOD_CLOSE_STRIPE_MAX_DELAY_MS,
@@ -151,8 +151,8 @@ function totalsChanged(left: PeriodCloseInvoiceTotals, right: PeriodCloseInvoice
     || compareDecimalStrings(left.overage.amount, right.overage.amount) !== 0;
 }
 
-function createStripeWriteClient(): ConnectorHttpClient {
-  return createConnectorHttpClient({
+function createStripeWriteClient(): HttpRetryClient {
+  return createHttpRetryClient({
     baseUrl: stripeApiBaseUrl(),
     requestsPerMinute: PERIOD_CLOSE_STRIPE_REQUESTS_PER_MINUTE,
     maxAttempts: PERIOD_CLOSE_STRIPE_MAX_ATTEMPTS,

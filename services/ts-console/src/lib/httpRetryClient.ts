@@ -1,6 +1,16 @@
-import { ConnectorError } from "./connector.js";
+// Generic GET/POST HTTP client with token-bucket rate limiting and
+// exponential backoff retry, for authenticated outbound calls that need to
+// both read AND write (e.g. TEID-39's Stripe invoice-item writes).
+//
+// Deliberately NOT part of services/ts-console/src/lib/connectors/ -- that
+// directory's httpClient.ts is GET-only by construction, and
+// tests/connectors/no-write-guard.test.ts (TEID-65-T8) proves it
+// structurally: every file under connectors/ is scanned for any fetch()
+// call whose method isn't a literal "GET". A write-capable client placed in
+// that directory would undermine that guarantee, so this is its own module.
+import { ConnectorError } from "./connectors/connector.js";
 
-export interface ConnectorHttpClientConfig {
+export interface HttpRetryClientConfig {
   baseUrl: string;
   requestsPerMinute?: number;
   maxAttempts?: number;
@@ -9,13 +19,18 @@ export interface ConnectorHttpClientConfig {
   timeoutMs?: number;
 }
 
-export interface ConnectorHttpResponse {
+export interface HttpRetryResponse {
   status: number;
   body: unknown;
 }
 
-export interface ConnectorHttpClient {
-  get(path: string, headers?: Record<string, string>): Promise<ConnectorHttpResponse>;
+export interface HttpRetryClient {
+  get(path: string, headers?: Record<string, string>): Promise<HttpRetryResponse>;
+  post(path: string, body?: string | URLSearchParams, headers?: Record<string, string>): Promise<HttpRetryResponse>;
+}
+
+export function httpRetryBackoffDelayMs(attemptNumber: number, baseDelayMs: number, maxDelayMs: number): number {
+  return Math.min(baseDelayMs * 2 ** (attemptNumber - 1), maxDelayMs);
 }
 
 function positive(name: string, value: number): void {
@@ -41,7 +56,7 @@ function failureDetail(body: unknown, fallback: string): string {
   return fallback;
 }
 
-export function createConnectorHttpClient(config: ConnectorHttpClientConfig): ConnectorHttpClient {
+export function createHttpRetryClient(config: HttpRetryClientConfig): HttpRetryClient {
   const maxAttempts = config.maxAttempts ?? 5;
   const baseDelayMs = config.baseDelayMs ?? 1_000;
   const maxDelayMs = config.maxDelayMs ?? 60_000;
@@ -87,27 +102,41 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
     }
   }
 
-  async function attempt(path: string, headers: Record<string, string> | undefined): Promise<ConnectorHttpResponse> {
+  async function execute(
+    method: "GET" | "POST",
+    path: string,
+    headers: Record<string, string> | undefined,
+    body?: string | URLSearchParams,
+  ): Promise<HttpRetryResponse> {
     await acquireToken();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const requestHeaders: Record<string, string> = { ...headers };
+    let requestBody: string | undefined;
+    if (method === "POST") {
+      requestBody = body instanceof URLSearchParams ? body.toString() : body;
+      if (requestHeaders["Content-Type"] === undefined && requestHeaders["content-type"] === undefined) {
+        requestHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    }
     try {
       const response = await fetch(`${baseUrl}${path.startsWith("/") ? path : `/${path}`}`, {
-        method: "GET",
-        headers,
+        method,
+        headers: requestHeaders,
+        body: requestBody,
         signal: controller.signal,
       });
       const text = await response.text();
-      let body: unknown = text;
+      let payload: unknown = text;
       if (isJsonContentType(response.headers.get("content-type"))) {
         if (!text) {
-          body = null;
+          payload = null;
         } else {
           try {
-            body = JSON.parse(text) as unknown;
+            payload = JSON.parse(text) as unknown;
           } catch {
             throw new ConnectorError(
-              `connector returned malformed JSON (HTTP ${response.status})`,
+              `request returned malformed JSON (HTTP ${response.status})`,
               response.status,
               true,
             );
@@ -116,25 +145,25 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
       }
       if (response.status === 429 || response.status >= 500) {
         throw new ConnectorError(
-          `connector request failed with HTTP ${response.status}: ${failureDetail(body, response.statusText || "retryable upstream error")}`,
+          `request failed with HTTP ${response.status}: ${failureDetail(payload, response.statusText || "retryable upstream error")}`,
           response.status,
           true,
         );
       }
       if (response.status >= 400 && response.status < 500) {
         throw new ConnectorError(
-          `connector request failed with HTTP ${response.status}: ${failureDetail(body, response.statusText || "request rejected")}`,
+          `request failed with HTTP ${response.status}: ${failureDetail(payload, response.statusText || "request rejected")}`,
           response.status,
           false,
         );
       }
-      return { status: response.status, body };
+      return { status: response.status, body: payload };
     } catch (error) {
       if (error instanceof ConnectorError) throw error;
       const timedOut = controller.signal.aborted;
       const detail = error instanceof Error ? error.message : String(error);
       throw new ConnectorError(
-        timedOut ? `connector request timed out after ${timeoutMs}ms` : `connector network error: ${detail}`,
+        timedOut ? `request timed out after ${timeoutMs}ms` : `network error: ${detail}`,
         timedOut ? 408 : 0,
         true,
       );
@@ -143,29 +172,37 @@ export function createConnectorHttpClient(config: ConnectorHttpClientConfig): Co
     }
   }
 
-  return {
-    async get(path, headers) {
-      let lastError: ConnectorError | undefined;
-      for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
-        try {
-          return await attempt(path, headers);
-        } catch (error) {
-          const connectorError = error instanceof ConnectorError
-            ? error
-            : new ConnectorError(`connector request failed: ${String(error)}`, 0, true);
-          if (!connectorError.retryable) throw connectorError;
-          lastError = connectorError;
-          if (attemptNumber < maxAttempts) {
-            const delayMs = Math.min(baseDelayMs * 2 ** (attemptNumber - 1), maxDelayMs);
-            await sleep(delayMs);
-          }
+  async function withRetry(
+    run: () => Promise<HttpRetryResponse>,
+  ): Promise<HttpRetryResponse> {
+    let lastError: ConnectorError | undefined;
+    for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
+      try {
+        return await run();
+      } catch (error) {
+        const connectorError = error instanceof ConnectorError
+          ? error
+          : new ConnectorError(`request failed: ${String(error)}`, 0, true);
+        if (!connectorError.retryable) throw connectorError;
+        lastError = connectorError;
+        if (attemptNumber < maxAttempts) {
+          await sleep(httpRetryBackoffDelayMs(attemptNumber, baseDelayMs, maxDelayMs));
         }
       }
-      throw new ConnectorError(
-        `connector request failed after ${maxAttempts} attempts: ${lastError?.message ?? "unknown error"}`,
-        lastError?.statusCode ?? 0,
-        false,
-      );
+    }
+    throw new ConnectorError(
+      `request failed after ${maxAttempts} attempts: ${lastError?.message ?? "unknown error"}`,
+      lastError?.statusCode ?? 0,
+      false,
+    );
+  }
+
+  return {
+    get(path, headers) {
+      return withRetry(() => execute("GET", path, headers));
+    },
+    post(path, body, headers) {
+      return withRetry(() => execute("POST", path, headers, body));
     },
   };
 }
