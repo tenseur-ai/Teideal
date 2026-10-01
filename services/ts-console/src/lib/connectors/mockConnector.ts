@@ -180,6 +180,10 @@ export function currencyMinorDigits(currency: string): number {
   return 2;
 }
 
+/**
+ * Accepts integer minor units only. Callers must convert values to the platform's own integer
+ * minor units before calling; this function intentionally has no major-unit mode and none should be added.
+ */
 export function decimalAmount(value: number | string, currency: string): string {
   const raw = String(value);
   if (!/^-?\d+$/.test(raw)) {
@@ -219,19 +223,36 @@ export function mapConnectorCustomer(row: StripeLikeCustomer): ConnectorCustomer
   };
 }
 
+// This narrow id-recognition convention is only for fixture/mock data; real connectors map distinct API id/name fields directly.
+const PRODUCT_ID_PREFIX = /^prod_/;
+
+function resolveProduct(product: string | { id?: string; name: string }): {
+  productId: string | null;
+  productName: string;
+} {
+  if (typeof product !== "string") {
+    return { productId: product.id ?? null, productName: product.name };
+  }
+  if (PRODUCT_ID_PREFIX.test(product)) {
+    return { productId: product, productName: product };
+  }
+  return { productId: null, productName: product };
+}
+
 export function mapConnectorPrice(row: StripeLikePrice): ConnectorPrice {
   const {
     id, product, unit_amount, currency, billing_scheme, interval, recurring, nickname,
     external_updated_at, updated, ...passthrough
   } = row;
+  const { productId, productName } = resolveProduct(product);
   return {
     id,
-    product_name: typeof product === "string" ? product : product.name,
+    product_name: productName,
     amount: decimalAmount(unit_amount, currency),
     currency: currency.toUpperCase(),
     billing_scheme,
     interval: interval ?? recurring?.interval ?? null,
-    product_id: typeof product === "string" ? product : product.id ?? null,
+    product_id: productId,
     nickname: nickname ?? null,
     external_updated_at: externalUpdatedAt(external_updated_at, updated),
     passthrough,

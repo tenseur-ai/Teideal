@@ -215,7 +215,7 @@ jobs:
 
       - name: Install connector framework suite dependencies
         working-directory: tests/connectors
-        run: npm install --no-audit --no-fund
+        run: npm ci
 
       - name: Run TEID-98 acceptance suite (connector contract, retries, sync health, adversarial failures, and scale)
         working-directory: tests/connectors

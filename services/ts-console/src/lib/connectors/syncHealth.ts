@@ -81,6 +81,7 @@ export async function completeSync(
            END,
            cursor_high_water = CASE
              WHEN $1 = 'succeeded' AND $4::jsonb IS NOT NULL
+               -- JSONB || is a shallow merge: each supplied top-level entity key fully replaces its prior {since, cursor} object; nested fields are not merged.
                THEN cursor_high_water || $4::jsonb
              ELSE cursor_high_water
            END,
