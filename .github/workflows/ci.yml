@@ -223,6 +223,18 @@ jobs:
           npm run typecheck
           npm test
 
+      - name: Install Verify billed-line mapping suite dependencies
+        working-directory: tests/verify
+        run: npm ci
+
+      - name: Run TEID-66 acceptance suite (typed billed lines, unmapped customers, idempotency, incremental updates, and scale)
+        working-directory: tests/verify
+        env:
+          VERIFY_MAPPING_SCALE_BUDGET_MS: "60000"
+        run: |
+          npm run typecheck
+          npm test
+
       - name: Install sandbox suite dependencies
         working-directory: tests/sandbox
         run: npm ci
