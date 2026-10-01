@@ -186,12 +186,12 @@ function classify(input: {
   coverageGapReasons: string[];
   tolerance: string;
 }): DiscrepancyClassification | null {
-  // Coverage is deliberately evaluated first. A credit/refund-only period
-  // otherwise has exactly the same zero-billed shape as a missing invoice.
-  if (input.coverageGapReasons.length > 0) return "known_coverage_gap";
   if (isZero(input.delta)) return null;
-  if (!isZero(input.expectedTotal)
-    && (input.billedLineCount === "0" || isZero(input.billedTotal))) {
+  if (!isZero(input.expectedTotal) && input.billedLineCount === "0" && isZero(input.billedTotal)) {
+    // Coverage evidence distinguishes a known unsupported-activity-only period
+    // from a genuinely missing invoice, but does not mask discrepancies when
+    // overlapping billed lines exist.
+    if (input.coverageGapReasons.length > 0) return "known_coverage_gap";
     return "missing_line";
   }
   if (quantitiesDiffer(input.independentQuantity, input.billedQuantity, input.tolerance)) {
@@ -225,7 +225,7 @@ export async function generateDiscrepancyReport(input: DiscrepancyReportInput): 
                 SUM(quantity) OVER (PARTITION BY customer_id)::text AS billed_quantity,
                 COUNT(*) OVER (PARTITION BY customer_id)::text AS billed_line_count
          FROM verify_billed_lines
-         WHERE tenant_id = $1 AND period_start = $2 AND period_end = $3
+         WHERE tenant_id = $1 AND period_start < $3 AND period_end > $2
          ORDER BY customer_id, stripe_invoice_line_id, id`,
         [input.tenantId, input.periodStart, input.periodEnd],
       );
@@ -304,7 +304,7 @@ export async function generateDiscrepancyReport(input: DiscrepancyReportInput): 
            CASE WHEN jsonb_typeof(invoice.data->'lines') = 'array'
                 THEN invoice.data->'lines' ELSE '[]'::jsonb END
          ) AS line(id text, period_start timestamptz, period_end timestamptz, amount numeric)
-         WHERE u.tenant_id = $1 AND line.period_start = $2 AND line.period_end = $3
+         WHERE u.tenant_id = $1 AND line.period_start < $3 AND line.period_end > $2
          GROUP BY u.stripe_customer_id
          ORDER BY u.stripe_customer_id`,
         [input.tenantId, input.periodStart, input.periodEnd],
@@ -419,6 +419,8 @@ export async function generateDiscrepancyReport(input: DiscrepancyReportInput): 
     quantity_tolerance: tolerance,
     caveats: [
       "Billed data reflects the last successful connector sync; Stripe-side deletions or voids can leave stale verify_billed_lines rows.",
+      "Invoices synced before the period-flatten fix require a resync and remap (POST /verify/map-billed-lines again) before this report can be trusted for them.",
+      "Credits and refunds are tracked as coverage-gap evidence only and are never subtracted from the billed total.",
       "This v0 report compares customer-period totals, not price-matched invoice lines.",
     ],
   };
