@@ -89,6 +89,10 @@ export interface PeriodCloseLedgerRow {
   customer_id: string;
   usage_billed: string;
   adjustments: string;
+  ledger_line_ids: string[];
+  usage_event_ids: string[];
+  usage_event_count: string;
+  usage_quantity: string;
 }
 
 export interface ListQuery {

@@ -227,10 +227,11 @@ jobs:
         working-directory: tests/verify
         run: npm ci
 
-      - name: Run TEID-66 acceptance suite (typed billed lines, unmapped customers, idempotency, incremental updates, and scale)
+      - name: Run TEID-66/68 acceptance suites (billed-line mapping and classified discrepancy reporting)
         working-directory: tests/verify
         env:
           VERIFY_MAPPING_SCALE_BUDGET_MS: "60000"
+          VERIFY_DISCREPANCY_SCALE_BUDGET_MS: "60000"
         run: |
           npm run typecheck
           npm test

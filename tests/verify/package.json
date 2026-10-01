@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "TEID-66 billed-line mapping acceptance suite",
+  "description": "TEID-66/68 Verify billed-line and discrepancy acceptance suites",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
