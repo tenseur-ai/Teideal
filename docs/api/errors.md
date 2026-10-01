@@ -41,6 +41,7 @@ valid. Each result has one of these stable `status` values:
   `quantity must not exceed 1000000000000 (one trillion)`,
   `idempotency_key is required`,
   `occurred_at must be an RFC3339 timestamp with an explicit UTC offset or Z`,
+  `actual_cost must be a non-negative number less than 1000000`,
   `customer not found for this tenant`, or
   `failed to record usage event`.
 

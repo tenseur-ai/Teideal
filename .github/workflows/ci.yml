@@ -247,6 +247,14 @@ jobs:
         working-directory: tests/rate-overrides
         run: npx vitest run
 
+      - name: Install cost-analytics suite dependencies
+        working-directory: tests/cost-analytics
+        run: npm ci
+
+      - name: Run TEID-51 acceptance suite (inference cost recording, effective-dated rates, explicit actual_cost, pricing independence, scale, adversarial validation)
+        working-directory: tests/cost-analytics
+        run: npx vitest run
+
       - name: Run TEID-44 acceptance suite (formats, SLAs, schedules, docs, retries, concurrency, ownership)
         working-directory: tests/data-export
         run: npx vitest run

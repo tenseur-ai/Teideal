@@ -1,0 +1,19 @@
+{
+  "name": "@teideal/cost-analytics-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TEID-51 inference cost recording acceptance suite",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "otpauth": "^9.5.2",
+    "pg": "^8.13.1",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.2"
+  }
+}
