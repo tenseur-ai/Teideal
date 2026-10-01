@@ -89,6 +89,7 @@ function invoiceWithEmbeddedLines(row: Record<string, unknown>): StripeLikeInvoi
   const lines = rawLines.map((value) => {
     const line = value as Record<string, unknown>;
     const price = line.price as Record<string, unknown> | string | null | undefined;
+    const period = line.period as { start?: unknown; end?: unknown } | null | undefined;
     return {
       ...line,
       price: typeof price === "object" && price !== null
@@ -99,6 +100,12 @@ function invoiceWithEmbeddedLines(row: Record<string, unknown>): StripeLikeInvoi
         ?? (typeof price === "object" && price !== null ? price.unit_amount : undefined)
         ?? line.amount
         ?? "0",
+      // Stripe's actual invoice line shape nests the period as `period.start`/
+      // `period.end`; the flat fields only exist in our own fixtures. Without
+      // this fallback, every real Stripe line looks periodless and TEID-66
+      // silently drops it. The flat fields still win if a caller sets them.
+      period_start: line.period_start ?? period?.start ?? null,
+      period_end: line.period_end ?? period?.end ?? null,
     } as unknown as StripeLikeInvoiceLine;
   });
   return { ...row, lines } as unknown as StripeLikeInvoice;

@@ -566,4 +566,45 @@ describe("TEID-65.1 Stripe ingest completeness", () => {
       await deleteFixture(fixture.connectorId, fixture.connectionId);
     }
   });
+
+  it("TEID-65.1-T7 flattens Stripe's nested line.period into period_start/period_end", async () => {
+    const fixture = await connectAndRegister("TEID-65.1 T7 Nested Period");
+    const created = Math.floor(Date.now() / 1_000) - 60;
+    const periodStart = created;
+    const periodEnd = created + 2_592_000;
+    try {
+      await seed(fixture.accessToken, "invoices", [{
+        id: "in_651_nested_period", customer: "cus_651_nested", amount_due: "100", currency: "usd",
+        status: "paid", created, due_date: null,
+        lines: { data: [
+          // Real Stripe invoice lines nest the period as an object, never as
+          // flat period_start/period_end fields -- no flat fields here on
+          // purpose, to prove the connector doesn't depend on fixture-only shape.
+          {
+            id: "il_651_nested", price: "price_651_nested", quantity: "1",
+            unit_amount: "100", amount: "100", currency: "usd",
+            period: { start: periodStart, end: periodEnd },
+          },
+        ] },
+      }]);
+      const sync = await call(`${TS_CONSOLE_URL}/connectors/${fixture.connectorId}/sync`, {
+        method: "POST",
+        token: await billingSession(),
+      });
+      expect(sync.status).toBe(200);
+
+      const stored = await withTenant(TENANT_ID, async (client) => (await client.query<{
+        data: { lines: Array<{ id: string; period_start: string | null; period_end: string | null }> };
+      }>(
+        `SELECT data FROM connector_records
+         WHERE connector_id = $1 AND entity_type = 'invoice' AND external_id = 'in_651_nested_period'`,
+        [fixture.connectorId],
+      )).rows[0].data);
+      const line = stored.lines.find((candidate) => candidate.id === "il_651_nested");
+      expect(line?.period_start).toBe(new Date(periodStart * 1_000).toISOString());
+      expect(line?.period_end).toBe(new Date(periodEnd * 1_000).toISOString());
+    } finally {
+      await deleteFixture(fixture.connectorId, fixture.connectionId);
+    }
+  });
 });
