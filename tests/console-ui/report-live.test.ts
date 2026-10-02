@@ -90,25 +90,43 @@ afterAll(async () => {
   await verifyPool.end();
 });
 
+// The shared tenant's report can carry thousands of rows left behind by
+// other suites' own scale tests running earlier in the same CI job against
+// the same database (TEID-65's 2-million-line backfill, TEID-68.1's
+// 500-customer scale seed, and this session's own long-lived local
+// accumulation) -- none of that is this test's concern. Rendering a
+// screen module builds one DOM row per report row regardless, so asserting
+// against the raw, untrimmed response makes every one of these tests'
+// cost scale with however much unrelated data happens to exist in the
+// tenant at the moment it runs, not with anything this test actually
+// seeded. Trim to just the two rows this test created before rendering.
+function trimmedReport(raw: any): any {
+  const data = raw.data.filter((row: any) => row.customer_id === matchCustomer || row.customer_id === mismatchCustomer);
+  return { ...raw, data };
+}
+
 describe("TEID-UI-1 live Verify rendering", () => {
   it("TEID-UI-1-T5 uses a freshly seeded $500 match plus a $500/$400 customer and sorts the mismatch first", async () => {
     const raw = await report();
     expect(raw.data.find((row: any) => row.customer_id === matchCustomer)).toMatchObject({ expected_total: "500.00", billed_total: "500.00", delta: "0.00", classification: null });
     expect(raw.data.find((row: any) => row.customer_id === mismatchCustomer)).toMatchObject({ expected_total: "500.00", billed_total: "400.00" });
+    const trimmed = trimmedReport(raw);
     const module: any = await import("../../services/ts-console/public/screens/home.js");
     const container = dom();
-    await module.render(container, { apiFetch: async () => raw, principal: { role: "Billing Admin" }, getMonth: () => "2026-08", setMonth: () => undefined, navigate: () => undefined });
+    await module.render(container, { apiFetch: async () => trimmed, principal: { role: "Billing Admin" }, getMonth: () => "2026-08", setMonth: () => undefined, navigate: () => undefined });
     const customerNames = [...container.querySelectorAll("tbody tr td:first-child")].map((node) => node.textContent);
-    expect(customerNames.indexOf(raw.data.find((row: any) => row.customer_id === mismatchCustomer).customer_name))
-      .toBeLessThan(customerNames.indexOf(raw.data.find((row: any) => row.customer_id === matchCustomer).customer_name));
+    expect(customerNames.indexOf(trimmed.data.find((row: any) => row.customer_id === mismatchCustomer).customer_name))
+      .toBeLessThan(customerNames.indexOf(trimmed.data.find((row: any) => row.customer_id === matchCustomer).customer_name));
   });
 
   it("TEID-UI-1-T6 renders live API monetary strings byte-identically and the match customer's cross-month period", async () => {
     const raw = await report();
+    const trimmed = trimmedReport(raw);
+    expect(trimmed.data).toHaveLength(2);
     const module: any = await import("../../services/ts-console/public/screens/report.js");
     const container = dom();
-    await module.render(container, { apiFetch: async () => raw, principal: { role: "Billing Admin" }, getMonth: () => "2026-08", setMonth: () => undefined, navigate: () => undefined });
-    for (const row of raw.data) for (const field of ["expected_total", "billed_total", "delta"]) {
+    await module.render(container, { apiFetch: async () => trimmed, principal: { role: "Billing Admin" }, getMonth: () => "2026-08", setMonth: () => undefined, navigate: () => undefined });
+    for (const row of trimmed.data) for (const field of ["expected_total", "billed_total", "delta"]) {
       expect(container.querySelector(`[data-customer-id="${row.customer_id}"][data-money-field="${field}"]`)?.textContent).toBe(row[field]);
     }
     const matchRow = container.querySelector<HTMLTableRowElement>(`[data-customer-id="${matchCustomer}"]`)?.closest("tr");
