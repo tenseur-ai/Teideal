@@ -80,6 +80,17 @@ curl -X POST "$TS_CONSOLE_URL/plans/$PLAN_FAMILY_ID/versions" -H "authorization:
 curl -X POST "$TS_CONSOLE_URL/customers/$CUSTOMER_ID/subscription" -H "authorization: Bearer $SESSION_TOKEN" -H 'content-type: application/json' -d '{"plan_id":"'$PLAN_ID'"}'
 ```
 
+## GET /customers/:id/subscription [ts-console]
+
+- **Auth:** Owner or Billing Admin session.
+- **Request:** Customer UUID.
+- **Response:** `200` current subscription row.
+- **Errors:** `400` invalid UUID; `403` hidden customer/wrong role; `404` subscription missing.
+
+```bash
+curl "$TS_CONSOLE_URL/customers/$CUSTOMER_ID/subscription" -H "authorization: Bearer $SESSION_TOKEN"
+```
+
 ## POST /customers/:id/subscription/schedule-migration [ts-console]
 
 - **Auth:** Owner or Billing Admin session.

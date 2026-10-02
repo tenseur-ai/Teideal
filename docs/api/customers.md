@@ -1,7 +1,9 @@
 # Customers, hierarchy, consumption, and rate overrides
 
-Customer CRUD uses API-key authentication. Hierarchy, consumption, and
-override routes use console sessions and enforce tenant visibility.
+Customer writes use API-key authentication. Customer reads accept either a
+read-capable API key or an Owner/Billing Admin console session. Hierarchy,
+consumption, and override routes use console sessions and enforce tenant
+visibility.
 
 ## POST /customers [ts-console]
 
@@ -16,24 +18,24 @@ curl -X POST "$TS_CONSOLE_URL/customers" -H "authorization: Bearer $API_KEY" -H 
 
 ## GET /customers [ts-console]
 
-- **Auth:** `read-only` or `admin` API key.
+- **Auth:** `read-only`/`admin` API key, or Owner/Billing Admin session.
 - **Request:** No body.
 - **Response:** `200 {data:[customer...]}` for the key's tenant/customer scope.
 - **Errors:** `401/403` invalid key or scope.
 
 ```bash
-curl "$TS_CONSOLE_URL/customers" -H "authorization: Bearer $API_KEY"
+curl "$TS_CONSOLE_URL/customers" -H "authorization: Bearer $SESSION_TOKEN"
 ```
 
 ## GET /customers/:id [ts-console]
 
-- **Auth:** `read-only` or `admin` API key.
+- **Auth:** `read-only`/`admin` API key, or Owner/Billing Admin session.
 - **Request:** Path customer UUID.
 - **Response:** `200` customer.
 - **Errors:** `400` invalid UUID; `403` customer hidden from tenant/key; `401` invalid key.
 
 ```bash
-curl "$TS_CONSOLE_URL/customers/$CUSTOMER_ID" -H "authorization: Bearer $API_KEY"
+curl "$TS_CONSOLE_URL/customers/$CUSTOMER_ID" -H "authorization: Bearer $SESSION_TOKEN"
 ```
 
 ## PATCH /customers/:id [ts-console]

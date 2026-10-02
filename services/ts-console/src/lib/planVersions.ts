@@ -85,6 +85,20 @@ function shapeSubscription(row: SubscriptionRow): SubscriptionRecord {
   };
 }
 
+export async function readSubscription(
+  client: PoolClient,
+  tenantId: string,
+  customerId: string,
+): Promise<SubscriptionRecord | null> {
+  const row = (await client.query<SubscriptionRow>(
+    `SELECT ${SUBSCRIPTION_RETURNING}
+     FROM customer_plan_subscriptions
+     WHERE tenant_id = $1 AND customer_id = $2`,
+    [tenantId, customerId],
+  )).rows[0];
+  return row ? shapeSubscription(row) : null;
+}
+
 export function isFamilyVersionConflict(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const pg = error as { code?: string; constraint?: string };

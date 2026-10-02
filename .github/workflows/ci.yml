@@ -236,6 +236,16 @@ jobs:
           npm run typecheck
           npm test
 
+      - name: Install console UI suite dependencies
+        working-directory: tests/console-ui
+        run: npm ci
+
+      - name: Run TEID-UI-1 acceptance suite (integrated admin console)
+        working-directory: tests/console-ui
+        run: |
+          npm run typecheck
+          npm test
+
       - name: Install sandbox suite dependencies
         working-directory: tests/sandbox
         run: npm ci

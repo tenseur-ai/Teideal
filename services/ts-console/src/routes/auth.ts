@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { withTenant } from "../lib/db.js";
 import { resolveTenantByKey, getTenantSettings } from "../lib/tenants.js";
-import { findUserByEmail, findUserByGoogleSubjectOrEmail, findUserById, MANDATORY_MFA_ROLES } from "../lib/users.js";
+import { findUserByEmail, findUserByGoogleSubjectOrEmail, findUserById, MANDATORY_MFA_ROLES, ROLES } from "../lib/users.js";
 import { verifyPassword } from "../lib/passwords.js";
 import { verifyGoogleIdToken, GoogleTimeoutError, GoogleVerificationError } from "../lib/google.js";
 import { completePrimaryFactor } from "../lib/loginFlow.js";
@@ -194,6 +194,15 @@ export function registerAuthRoutes(app: FastifyInstance, pool: Pool) {
 
   app.register(async (scoped) => {
     scoped.addHook("preHandler", requireSession(pool));
+
+    consoleRoute(scoped, "get", "/auth/me", { role: [...ROLES] }, async (req, reply) => {
+      const principal = req.consolePrincipal!;
+      return reply.send({
+        user_id: principal.userId,
+        tenant_id: principal.tenantId,
+        role: principal.role,
+      });
+    });
 
     consoleRoute(scoped, "post", "/auth/mfa/reset", { selfService: true }, async (req, reply) => {
       const { tenantId, userId } = req.consolePrincipal!;

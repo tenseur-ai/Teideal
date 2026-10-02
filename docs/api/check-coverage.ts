@@ -23,7 +23,7 @@ export interface CoverageResult {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "../..");
-const documentedRouteHeading = /^## (GET|POST|PUT|PATCH|DELETE) (`?)(\/[^`\s]+)\2 \[(ts-console|go-usage)\]$/gm;
+const documentedRouteHeading = /^## (GET|POST|PUT|PATCH|DELETE) (`?)(\/[^`\s]*)\2 \[(ts-console|go-usage)\]$/gm;
 const requiredFields = ["Auth", "Request", "Response", "Errors"];
 
 function key(route: ApiRoute): string {
