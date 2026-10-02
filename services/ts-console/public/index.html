@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Teideal Console</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#home" aria-label="Teideal Console home">Teideal <span>Console</span></a>
+      <div id="session-summary" class="session-summary" aria-live="polite"></div>
+    </header>
+    <div class="app-layout">
+      <nav id="primary-nav" class="primary-nav" aria-label="Console" hidden></nav>
+      <main id="app" tabindex="-1"></main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

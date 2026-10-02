@@ -1,6 +1,7 @@
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
-import { pathToFileURL } from "node:url";
+import fastifyStatic from "@fastify/static";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createPool } from "./lib/db.js";
 import { requireAuth } from "./lib/auth.js";
 import { registerCustomerRoutes } from "./routes/customers.js";
@@ -73,8 +74,13 @@ export function buildServer(options: BuildServerOptions = {}) {
   app.register(multipart, {
     limits: { files: 1, fileSize: 100 * 1024 * 1024 },
   });
+  app.register(fastifyStatic, {
+    root: fileURLToPath(new URL("../public/", import.meta.url)),
+    prefix: "/console/",
+  });
 
   app.get("/healthz", async () => ({ status: "ok" }));
+  app.get("/", async (_req, reply) => reply.redirect("/console/"));
 
   registerSecurityRoutes(app, pool, adminSecret);
   registerWebhookRoutes(app, pool, adminSecret);

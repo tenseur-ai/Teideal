@@ -10,6 +10,7 @@ import {
   previewMigration,
   publishNewVersion,
   readBillingAnchor,
+  readSubscription,
   scheduleMigration,
   setGrandfathered,
   type PlanVersionOverrides,
@@ -124,6 +125,23 @@ export function registerPlanVersionRoutes(app: FastifyInstance, pool: Pool) {
       if (assigned.status === "plan_not_found") return reply.code(404).send({ error: "plan not found" });
       if (assigned.status !== "ok") return reply.code(404).send({ error: "subscription not found" });
       return reply.code(201).send(assigned.subscription);
+    });
+
+    consoleRoute(scoped, "get", "/customers/:id/subscription", { role: ["Owner", "Billing Admin"] }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (!UUID_RE.test(id)) return reply.code(400).send({ error: "id must be a UUID" });
+      const tenantId = req.consolePrincipal!.tenantId;
+      const result = await withTenant(pool, tenantId, async (client) => {
+        if (!(await customerVisible(client, id))) return { status: "invisible" as const };
+        const subscription = await readSubscription(client, tenantId, id);
+        return subscription ? { status: "ok" as const, subscription } : { status: "not_found" as const };
+      });
+      if (result.status === "invisible") {
+        await rejectInvisibleCustomer(pool, tenantId, "/customers/:id/subscription", "GET", reply);
+        return;
+      }
+      if (result.status === "not_found") return reply.code(404).send({ error: "subscription not found" });
+      return reply.send(result.subscription);
     });
 
     consoleRoute(scoped, "post", "/customers/:id/subscription/schedule-migration", { role: ["Owner", "Billing Admin"] }, async (req, reply) => {

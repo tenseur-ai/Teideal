@@ -3,6 +3,17 @@
 Console-session routes use `Authorization: Bearer $SESSION_TOKEN`. API keys
 are returned in plaintext only by create/rotate; store them immediately.
 
+## GET /auth/me [ts-console]
+
+- **Auth:** Any console session role.
+- **Request:** No body.
+- **Response:** `200 {user_id,tenant_id,role}` for the current session.
+- **Errors:** `401` invalid or expired session.
+
+```bash
+curl "$TS_CONSOLE_URL/auth/me" -H "authorization: Bearer $SESSION_TOKEN"
+```
+
 ## GET /auth/sso-status [ts-console]
 
 - **Auth:** Public.
